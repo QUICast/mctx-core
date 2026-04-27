@@ -1,0 +1,27 @@
+[package]
+name = "mctx-core"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-2-Clause"
+description = "Runtime-agnostic and portable IPv4 multicast sender library."
+readme = "README.md"
+repository = "https://github.com/QUICast/mctx-core"
+homepage = "https://github.com/QUICast/mctx-core"
+documentation = "https://docs.rs/mctx-core"
+keywords = ["multicast", "udp", "networking", "sender", "asm"]
+categories = ["network-programming"]
+
+[features]
+default = []
+metrics = []
+tokio = ["dep:tokio"]
+
+[dependencies]
+socket2 = "0.6.3"
+thiserror = "2.0.18"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time"], optional = true }
+
+[[bin]]
+name = "mctx_tokio_send"
+path = "src/bin/mctx_tokio_send.rs"
+required-features = ["tokio"]
