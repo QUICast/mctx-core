@@ -2,6 +2,7 @@
 use crate::metrics::ContextMetricsSnapshot;
 use crate::{MctxError, Publication, PublicationConfig, PublicationId, SendReport};
 use socket2::Socket;
+use std::net::UdpSocket;
 
 /// Small owner for a set of multicast publication sockets.
 #[derive(Debug)]
@@ -86,6 +87,26 @@ impl Context {
 
         let id = self.next_publication_id();
         let publication = Publication::new_with_socket(id, config, socket)?;
+        self.publications.push(publication);
+        Ok(id)
+    }
+
+    /// Stores an existing standard-library UDP socket as a publication after configuring it.
+    pub fn add_publication_with_udp_socket(
+        &mut self,
+        config: PublicationConfig,
+        socket: UdpSocket,
+    ) -> Result<PublicationId, MctxError> {
+        if self
+            .publications
+            .iter()
+            .any(|publication| publication.config() == &config)
+        {
+            return Err(MctxError::DuplicatePublication);
+        }
+
+        let id = self.next_publication_id();
+        let publication = Publication::new_with_udp_socket(id, config, socket)?;
         self.publications.push(publication);
         Ok(id)
     }

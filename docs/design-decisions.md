@@ -12,6 +12,10 @@ Each publication connects its UDP socket to a single multicast destination.
 That keeps repeated sends simple and avoids rebuilding the same destination
 address on every call.
 
+When a caller requests `with_source_addr(...)` or `with_bind_addr(...)`,
+`mctx-core` binds that exact local IPv4 before connecting so the resulting wire
+source is deterministic for announce-style protocols.
+
 ## Optional Add-Ons
 
 The base crate keeps only the essentials:

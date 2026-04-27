@@ -2,7 +2,7 @@
 use crate::metrics::PublicationMetricsSnapshot;
 use crate::{MctxError, PublicationConfig, SendReport};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, RawFd};
 #[cfg(windows)]
@@ -67,6 +67,15 @@ impl Publication {
         })
     }
 
+    /// Wraps and configures an existing standard-library UDP socket.
+    pub fn new_with_udp_socket(
+        id: PublicationId,
+        config: PublicationConfig,
+        socket: UdpSocket,
+    ) -> Result<Self, MctxError> {
+        Self::new_with_socket(id, config, Socket::from(socket))
+    }
+
     /// Returns the publication ID.
     pub fn id(&self) -> PublicationId {
         self.id
@@ -99,9 +108,13 @@ impl Publication {
                 #[cfg(feature = "metrics")]
                 self.metrics.record_success(bytes_sent);
 
+                let local_addr = self.local_addr_v4().ok();
+
                 Ok(SendReport {
                     publication_id: self.id,
                     destination: self.destination(),
+                    local_addr,
+                    source_addr: local_addr.map(|addr| *addr.ip()),
                     bytes_sent,
                 })
             }
@@ -121,6 +134,24 @@ impl Publication {
             .map_err(MctxError::SocketLocalAddrFailed)?
             .as_socket()
             .ok_or(MctxError::ExistingSocketMustBeIpv4)
+    }
+
+    /// Returns the publication socket local IPv4 address.
+    pub fn local_addr_v4(&self) -> Result<SocketAddrV4, MctxError> {
+        match self.local_addr()? {
+            SocketAddr::V4(local_addr) => Ok(local_addr),
+            SocketAddr::V6(_) => Err(MctxError::ExistingSocketMustBeIpv4),
+        }
+    }
+
+    /// Returns the effective local IPv4 source address.
+    pub fn source_addr(&self) -> Result<Ipv4Addr, MctxError> {
+        Ok(*self.local_addr_v4()?.ip())
+    }
+
+    /// Returns the `(source, group, udp_port)` tuple needed for announce frames.
+    pub fn announce_tuple(&self) -> Result<(Ipv4Addr, Ipv4Addr, u16), MctxError> {
+        Ok((self.source_addr()?, self.config.group, self.config.dst_port))
     }
 
     /// Consumes the publication and returns the live socket.
@@ -156,8 +187,8 @@ impl Publication {
             .set_nonblocking(true)
             .map_err(MctxError::SocketOptionFailed)?;
 
-        if let Some(source_port) = config.source_port {
-            Self::bind_source_port_if_needed(socket, source_port)?;
+        if let Some(bind_addr) = config.bind_addr() {
+            Self::bind_if_needed(socket, bind_addr)?;
         }
 
         if let Some(interface) = config.interface {
@@ -189,6 +220,16 @@ impl Publication {
 
         match local_addr.as_socket() {
             Some(SocketAddr::V4(local_v4)) => {
+                if let Some(expected) = config.source_addr
+                    && local_v4.ip() != &Ipv4Addr::UNSPECIFIED
+                    && local_v4.ip() != &expected
+                {
+                    return Err(MctxError::ExistingSocketAddressMismatch {
+                        expected,
+                        actual: *local_v4.ip(),
+                    });
+                }
+
                 if let Some(expected) = config.source_port
                     && local_v4.port() != 0
                     && local_v4.port() != expected
@@ -205,10 +246,10 @@ impl Publication {
         }
     }
 
-    fn bind_source_port_if_needed(socket: &Socket, source_port: u16) -> Result<(), MctxError> {
+    fn bind_if_needed(socket: &Socket, bind_addr: SocketAddrV4) -> Result<(), MctxError> {
         let needs_bind = match socket.local_addr() {
             Ok(local_addr) => match local_addr.as_socket() {
-                Some(SocketAddr::V4(local_v4)) => local_v4.port() == 0,
+                Some(SocketAddr::V4(local_v4)) => local_v4 != bind_addr,
                 Some(SocketAddr::V6(_)) | None => return Err(MctxError::ExistingSocketMustBeIpv4),
             },
             Err(_) => true,
@@ -216,10 +257,7 @@ impl Publication {
 
         if needs_bind {
             socket
-                .bind(&SockAddr::from(SocketAddrV4::new(
-                    Ipv4Addr::UNSPECIFIED,
-                    source_port,
-                )))
+                .bind(&SockAddr::from(bind_addr))
                 .map_err(MctxError::SocketBindFailed)?;
         }
 
@@ -285,6 +323,7 @@ mod tests {
     #[cfg(feature = "metrics")]
     use crate::metrics::PublicationMetricsSampler;
     use crate::test_support::{TEST_GROUP, recv_payload, test_multicast_receiver};
+    use socket2::{Domain, Protocol, SockAddr, Type};
 
     #[test]
     fn publication_send_reaches_a_local_receiver() {
@@ -294,8 +333,13 @@ mod tests {
 
         let report = publication.send(b"hello multicast").unwrap();
         let payload = recv_payload(&receiver);
+        let announce = publication.announce_tuple().unwrap();
 
         assert_eq!(report.destination, SocketAddrV4::new(TEST_GROUP, port));
+        assert!(report.local_addr.is_some());
+        assert_eq!(report.source_addr, report.local_addr.map(|addr| *addr.ip()));
+        assert_eq!(announce.1, TEST_GROUP);
+        assert_eq!(announce.2, port);
         assert_eq!(payload, b"hello multicast");
     }
 
@@ -314,5 +358,31 @@ mod tests {
         assert_eq!(delta.packets_sent, 1);
         assert_eq!(delta.bytes_sent, b"metrics packet".len() as u64);
         assert_eq!(delta.send_errors, 0);
+    }
+
+    #[test]
+    fn existing_socket_source_addr_mismatch_is_rejected() {
+        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
+        socket
+            .bind(&SockAddr::from(SocketAddrV4::new(
+                Ipv4Addr::new(127, 0, 0, 1),
+                0,
+            )))
+            .unwrap();
+
+        let result = Publication::new_with_socket(
+            PublicationId(1),
+            PublicationConfig::new(TEST_GROUP, 5000).with_source_addr(Ipv4Addr::new(127, 0, 0, 2)),
+            socket,
+        );
+
+        assert!(matches!(
+            result,
+            Err(MctxError::ExistingSocketAddressMismatch {
+                expected,
+                actual
+            }) if expected == Ipv4Addr::new(127, 0, 0, 2)
+                && actual == Ipv4Addr::new(127, 0, 0, 1)
+        ));
     }
 }

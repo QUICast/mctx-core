@@ -12,6 +12,8 @@ pub struct PublicationConfig {
     pub interface: Option<Ipv4Addr>,
     /// The source UDP port to bind before sending, if explicitly set.
     pub source_port: Option<u16>,
+    /// The source IPv4 address to bind before sending, if explicitly set.
+    pub source_addr: Option<Ipv4Addr>,
     /// The multicast TTL for transmitted packets.
     pub ttl: u32,
     /// Whether outbound multicast packets should be looped back to the local host.
@@ -26,6 +28,7 @@ impl PublicationConfig {
             dst_port: port,
             interface: None,
             source_port: None,
+            source_addr: None,
             ttl: 1,
             loopback: true,
         }
@@ -43,6 +46,12 @@ impl PublicationConfig {
 
         if matches!(self.source_port, Some(0)) {
             return Err(MctxError::InvalidSourcePort);
+        }
+
+        if let Some(source_addr) = self.source_addr
+            && (source_addr.is_multicast() || source_addr.is_unspecified())
+        {
+            return Err(MctxError::InvalidSourceAddress);
         }
 
         if let Some(interface) = self.interface
@@ -66,6 +75,19 @@ impl PublicationConfig {
         self
     }
 
+    /// Sets the exact local IPv4 source address to bind before sending.
+    pub fn with_source_addr(mut self, source_addr: Ipv4Addr) -> Self {
+        self.source_addr = Some(source_addr);
+        self
+    }
+
+    /// Sets the exact local IPv4 address and UDP port to bind before sending.
+    pub fn with_bind_addr(mut self, bind_addr: SocketAddrV4) -> Self {
+        self.source_addr = Some(*bind_addr.ip());
+        self.source_port = Some(bind_addr.port());
+        self
+    }
+
     /// Sets the multicast TTL.
     pub fn with_ttl(mut self, ttl: u32) -> Self {
         self.ttl = ttl;
@@ -82,6 +104,18 @@ impl PublicationConfig {
     pub fn destination(&self) -> SocketAddrV4 {
         SocketAddrV4::new(self.group, self.dst_port)
     }
+
+    /// Returns the exact local bind address requested by the configuration, if any.
+    pub fn bind_addr(&self) -> Option<SocketAddrV4> {
+        if self.source_addr.is_none() && self.source_port.is_none() {
+            return None;
+        }
+
+        Some(SocketAddrV4::new(
+            self.source_addr.unwrap_or(Ipv4Addr::UNSPECIFIED),
+            self.source_port.unwrap_or(0),
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -92,6 +126,7 @@ mod tests {
     fn valid_multicast_config_passes_validation() {
         let cfg = PublicationConfig::new(Ipv4Addr::new(239, 1, 2, 3), 5000)
             .with_source_port(5001)
+            .with_source_addr(Ipv4Addr::new(192, 168, 10, 5))
             .with_ttl(8)
             .with_loopback(false);
 
@@ -124,5 +159,26 @@ mod tests {
         let result = cfg.validate();
 
         assert!(matches!(result, Err(MctxError::InvalidInterfaceAddress)));
+    }
+
+    #[test]
+    fn unspecified_source_addr_fails_validation() {
+        let cfg = PublicationConfig::new(Ipv4Addr::new(239, 1, 2, 3), 5000)
+            .with_source_addr(Ipv4Addr::UNSPECIFIED);
+
+        let result = cfg.validate();
+
+        assert!(matches!(result, Err(MctxError::InvalidSourceAddress)));
+    }
+
+    #[test]
+    fn bind_addr_builder_sets_source_fields() {
+        let bind_addr = SocketAddrV4::new(Ipv4Addr::new(10, 1, 2, 3), 5001);
+        let cfg =
+            PublicationConfig::new(Ipv4Addr::new(239, 1, 2, 3), 5000).with_bind_addr(bind_addr);
+
+        assert_eq!(cfg.source_addr, Some(Ipv4Addr::new(10, 1, 2, 3)));
+        assert_eq!(cfg.source_port, Some(5001));
+        assert_eq!(cfg.bind_addr(), Some(bind_addr));
     }
 }

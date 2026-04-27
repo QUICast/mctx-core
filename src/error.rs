@@ -1,4 +1,4 @@
-use std::io;
+use std::{io, net::Ipv4Addr};
 use thiserror::Error;
 
 /// Errors returned by the multicast sender core.
@@ -15,6 +15,10 @@ pub enum MctxError {
     /// The configured source port is invalid.
     #[error("MCTX: invalid source port")]
     InvalidSourcePort,
+
+    /// The configured source IPv4 address is invalid.
+    #[error("MCTX: invalid source address")]
+    InvalidSourceAddress,
 
     /// The configured multicast interface address is invalid.
     #[error("MCTX: invalid interface address")]
@@ -55,6 +59,13 @@ pub enum MctxError {
     /// The provided existing socket is bound to a different UDP port than requested.
     #[error("MCTX: existing socket is bound to UDP port {actual}, expected {expected}")]
     ExistingSocketPortMismatch { expected: u16, actual: u16 },
+
+    /// The provided existing socket is bound to a different local IPv4 address than requested.
+    #[error("MCTX: existing socket is bound to local IPv4 address {actual}, expected {expected}")]
+    ExistingSocketAddressMismatch {
+        expected: Ipv4Addr,
+        actual: Ipv4Addr,
+    },
 
     /// Sending a packet failed.
     #[error("MCTX: send failed: {0}")]

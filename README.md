@@ -9,6 +9,7 @@ async or metrics add-ons.
 ## Highlights
 
 - IPv4 multicast send support with configurable interface, loopback, and TTL
+- Explicit local source IPv4 and bind-address control for announce-style senders
 - Non-blocking send API
 - Immediate-ready publications with caller-owned context and socket extraction
 - Caller-provided socket support
@@ -43,11 +44,13 @@ use std::net::Ipv4Addr;
 let mut ctx = Context::new();
 
 let config = PublicationConfig::new(Ipv4Addr::new(239, 1, 2, 3), 5000)
+    .with_source_addr(Ipv4Addr::new(192, 168, 1, 10))
     .with_ttl(8);
 let id = ctx.add_publication(config)?;
 
 let report = ctx.send(id, b"hello multicast")?;
 println!("sent {} bytes to {}", report.bytes_sent, report.destination);
+println!("wire source: {:?}", report.source_addr);
 ```
 
 ## Existing Sockets
@@ -69,6 +72,20 @@ let id = ctx.add_publication_with_socket(config, socket)?;
 ctx.send(id, b"hello from an existing socket")?;
 ```
 
+Or hand in a `std::net::UdpSocket` directly:
+
+```rust
+use mctx_core::{Context, PublicationConfig};
+use std::net::{Ipv4Addr, UdpSocket};
+
+let mut ctx = Context::new();
+let config = PublicationConfig::new(Ipv4Addr::new(239, 1, 2, 3), 5000);
+let socket = UdpSocket::bind("0.0.0.0:0")?;
+
+let id = ctx.add_publication_with_udp_socket(config, socket)?;
+ctx.send(id, b"hello from std::net::UdpSocket")?;
+```
+
 ## Event Loop Integration
 
 Borrow the live socket from a publication:
@@ -87,6 +104,13 @@ Or extract the publication and move it into another loop or runtime:
 let publication = ctx.take_publication(id).unwrap();
 let parts = publication.into_parts();
 let socket = parts.socket;
+```
+
+If you need the exact announce tuple used by the wire format:
+
+```rust
+let publication = ctx.get_publication(id).unwrap();
+let (source, group, udp_port) = publication.announce_tuple()?;
 ```
 
 ## Tokio Integration
