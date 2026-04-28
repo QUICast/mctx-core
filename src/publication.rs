@@ -7,6 +7,8 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::os::fd::{AsRawFd, RawFd};
 #[cfg(windows)]
 use std::os::windows::io::{AsRawSocket, RawSocket};
+#[cfg(feature = "metrics")]
+use std::time::SystemTime;
 
 /// Stable ID for one configured publication socket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -313,6 +315,7 @@ impl PublicationMetricsState {
             packets_sent: self.packets_sent.load(Relaxed),
             bytes_sent: self.bytes_sent.load(Relaxed),
             send_errors: self.send_errors.load(Relaxed),
+            captured_at: SystemTime::now(),
         }
     }
 }
@@ -349,11 +352,18 @@ mod tests {
         let (_receiver, port) = test_multicast_receiver();
         let publication =
             Publication::new(PublicationId(1), PublicationConfig::new(TEST_GROUP, port)).unwrap();
-        let sampler = PublicationMetricsSampler::new(&publication);
+        let mut sampler = PublicationMetricsSampler::new(&publication);
 
+        assert!(sampler.sample().is_none());
         publication.send(b"metrics packet").unwrap();
 
-        let delta = sampler.delta();
+        let snapshot = publication.metrics_snapshot();
+        let delta = sampler.sample().unwrap();
+
+        assert_eq!(snapshot.send_calls, 1);
+        assert_eq!(snapshot.packets_sent, 1);
+        assert_eq!(snapshot.bytes_sent, b"metrics packet".len() as u64);
+        assert_eq!(snapshot.send_errors, 0);
         assert_eq!(delta.send_calls, 1);
         assert_eq!(delta.packets_sent, 1);
         assert_eq!(delta.bytes_sent, b"metrics packet".len() as u64);

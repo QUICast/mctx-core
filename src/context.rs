@@ -2,13 +2,30 @@
 use crate::metrics::ContextMetricsSnapshot;
 use crate::{MctxError, Publication, PublicationConfig, PublicationId, SendReport};
 use socket2::Socket;
+#[cfg(feature = "metrics")]
+use std::cell::Cell;
 use std::net::UdpSocket;
+#[cfg(feature = "metrics")]
+use std::time::SystemTime;
+
+#[cfg(feature = "metrics")]
+#[derive(Debug, Default)]
+struct ContextMetricsInner {
+    publications_added: Cell<u64>,
+    publications_removed: Cell<u64>,
+    total_send_calls: Cell<u64>,
+    total_packets_sent: Cell<u64>,
+    total_bytes_sent: Cell<u64>,
+    total_send_errors: Cell<u64>,
+}
 
 /// Small owner for a set of multicast publication sockets.
 #[derive(Debug)]
 pub struct Context {
     publications: Vec<Publication>,
     next_id: u64,
+    #[cfg(feature = "metrics")]
+    metrics: ContextMetricsInner,
 }
 
 impl Default for Context {
@@ -18,11 +35,74 @@ impl Default for Context {
 }
 
 impl Context {
+    #[cfg(feature = "metrics")]
+    fn record_send_success(&self, bytes_sent: usize) {
+        self.metrics
+            .total_send_calls
+            .set(self.metrics.total_send_calls.get() + 1);
+        self.metrics
+            .total_packets_sent
+            .set(self.metrics.total_packets_sent.get() + 1);
+        self.metrics
+            .total_bytes_sent
+            .set(self.metrics.total_bytes_sent.get() + bytes_sent as u64);
+    }
+
+    #[cfg(feature = "metrics")]
+    fn record_send_error(&self) {
+        self.metrics
+            .total_send_calls
+            .set(self.metrics.total_send_calls.get() + 1);
+        self.metrics
+            .total_send_errors
+            .set(self.metrics.total_send_errors.get() + 1);
+    }
+
+    fn ensure_publication_config_is_unique(
+        &self,
+        config: &PublicationConfig,
+    ) -> Result<(), MctxError> {
+        if self
+            .publications
+            .iter()
+            .any(|publication| publication.config() == config)
+        {
+            return Err(MctxError::DuplicatePublication);
+        }
+
+        Ok(())
+    }
+
+    fn insert_publication(&mut self, publication: Publication) -> PublicationId {
+        let id = publication.id();
+        self.publications.push(publication);
+
+        #[cfg(feature = "metrics")]
+        self.metrics
+            .publications_added
+            .set(self.metrics.publications_added.get() + 1);
+
+        id
+    }
+
+    fn finish_publication_removal(&mut self, index: usize) -> Publication {
+        let publication = self.publications.swap_remove(index);
+
+        #[cfg(feature = "metrics")]
+        self.metrics
+            .publications_removed
+            .set(self.metrics.publications_removed.get() + 1);
+
+        publication
+    }
+
     /// Creates an empty multicast sender context.
     pub fn new() -> Self {
         Self {
             publications: Vec::new(),
             next_id: 1,
+            #[cfg(feature = "metrics")]
+            metrics: ContextMetricsInner::default(),
         }
     }
 
@@ -57,18 +137,11 @@ impl Context {
         &mut self,
         config: PublicationConfig,
     ) -> Result<PublicationId, MctxError> {
-        if self
-            .publications
-            .iter()
-            .any(|publication| publication.config() == &config)
-        {
-            return Err(MctxError::DuplicatePublication);
-        }
+        self.ensure_publication_config_is_unique(&config)?;
 
         let id = self.next_publication_id();
         let publication = Publication::new(id, config)?;
-        self.publications.push(publication);
-        Ok(id)
+        Ok(self.insert_publication(publication))
     }
 
     /// Stores an existing socket as a publication after configuring it.
@@ -77,18 +150,11 @@ impl Context {
         config: PublicationConfig,
         socket: Socket,
     ) -> Result<PublicationId, MctxError> {
-        if self
-            .publications
-            .iter()
-            .any(|publication| publication.config() == &config)
-        {
-            return Err(MctxError::DuplicatePublication);
-        }
+        self.ensure_publication_config_is_unique(&config)?;
 
         let id = self.next_publication_id();
         let publication = Publication::new_with_socket(id, config, socket)?;
-        self.publications.push(publication);
-        Ok(id)
+        Ok(self.insert_publication(publication))
     }
 
     /// Stores an existing standard-library UDP socket as a publication after configuring it.
@@ -97,32 +163,16 @@ impl Context {
         config: PublicationConfig,
         socket: UdpSocket,
     ) -> Result<PublicationId, MctxError> {
-        if self
-            .publications
-            .iter()
-            .any(|publication| publication.config() == &config)
-        {
-            return Err(MctxError::DuplicatePublication);
-        }
+        self.ensure_publication_config_is_unique(&config)?;
 
         let id = self.next_publication_id();
         let publication = Publication::new_with_udp_socket(id, config, socket)?;
-        self.publications.push(publication);
-        Ok(id)
+        Ok(self.insert_publication(publication))
     }
 
     /// Removes one publication and drops its socket.
     pub fn remove_publication(&mut self, id: PublicationId) -> bool {
-        let Some(index) = self
-            .publications
-            .iter()
-            .position(|publication| publication.id() == id)
-        else {
-            return false;
-        };
-
-        self.publications.swap_remove(index);
-        true
+        self.take_publication(id).is_some()
     }
 
     /// Extracts one publication from the context.
@@ -132,7 +182,7 @@ impl Context {
             .iter()
             .position(|publication| publication.id() == id)?;
 
-        Some(self.publications.swap_remove(index))
+        Some(self.finish_publication_removal(index))
     }
 
     /// Returns all tracked publications.
@@ -151,7 +201,20 @@ impl Context {
             .get_publication(id)
             .ok_or(MctxError::PublicationNotFound)?;
 
-        publication.send(payload)
+        match publication.send(payload) {
+            Ok(report) => {
+                #[cfg(feature = "metrics")]
+                self.record_send_success(report.bytes_sent);
+
+                Ok(report)
+            }
+            Err(error) => {
+                #[cfg(feature = "metrics")]
+                self.record_send_error();
+
+                Err(error)
+            }
+        }
     }
 
     /// Sends the same payload through every publication and pushes reports into `out`.
@@ -161,29 +224,43 @@ impl Context {
         let before = out.len();
 
         for publication in &self.publications {
-            out.push(publication.send(payload)?);
+            match publication.send(payload) {
+                Ok(report) => {
+                    #[cfg(feature = "metrics")]
+                    self.record_send_success(report.bytes_sent);
+
+                    out.push(report);
+                }
+                Err(error) => {
+                    #[cfg(feature = "metrics")]
+                    self.record_send_error();
+
+                    return Err(error);
+                }
+            }
         }
 
         Ok(out.len() - before)
     }
 
-    /// Returns a metrics snapshot aggregated across all publications.
+    /// Returns a snapshot of the context's current metrics.
+    ///
+    /// Counter fields such as `total_packets_sent` are cumulative for the
+    /// lifetime of the context for send activity issued through `Context`
+    /// methods. They are not recomputed from the currently active publications,
+    /// and they do not decrease when a publication is removed.
     #[cfg(feature = "metrics")]
     pub fn metrics_snapshot(&self) -> ContextMetricsSnapshot {
-        let mut snapshot = ContextMetricsSnapshot {
-            publication_count: self.publications.len(),
-            ..ContextMetricsSnapshot::default()
-        };
-
-        for publication in &self.publications {
-            let publication_metrics = publication.metrics_snapshot();
-            snapshot.send_calls += publication_metrics.send_calls;
-            snapshot.packets_sent += publication_metrics.packets_sent;
-            snapshot.bytes_sent += publication_metrics.bytes_sent;
-            snapshot.send_errors += publication_metrics.send_errors;
+        ContextMetricsSnapshot {
+            publications_added: self.metrics.publications_added.get(),
+            publications_removed: self.metrics.publications_removed.get(),
+            active_publications: self.publications.len(),
+            total_send_calls: self.metrics.total_send_calls.get(),
+            total_packets_sent: self.metrics.total_packets_sent.get(),
+            total_bytes_sent: self.metrics.total_bytes_sent.get(),
+            total_send_errors: self.metrics.total_send_errors.get(),
+            captured_at: SystemTime::now(),
         }
-
-        snapshot
     }
 
     fn next_publication_id(&mut self) -> PublicationId {
@@ -234,15 +311,49 @@ mod tests {
         let id = context
             .add_publication(PublicationConfig::new(TEST_GROUP, port))
             .unwrap();
-        let sampler = ContextMetricsSampler::new(&context);
+        let mut sampler = ContextMetricsSampler::new(&context);
 
+        assert!(sampler.sample().is_none());
         context.send(id, b"metrics").unwrap();
 
-        let delta = sampler.delta();
-        assert_eq!(delta.publication_count_change, 0);
+        let snapshot = context.metrics_snapshot();
+        let delta = sampler.sample().unwrap();
+
+        assert_eq!(snapshot.publications_added, 1);
+        assert_eq!(snapshot.publications_removed, 0);
+        assert_eq!(snapshot.active_publications, 1);
+        assert_eq!(snapshot.total_send_calls, 1);
+        assert_eq!(snapshot.total_packets_sent, 1);
+        assert_eq!(snapshot.total_bytes_sent, b"metrics".len() as u64);
+        assert_eq!(snapshot.total_send_errors, 0);
+        assert_eq!(delta.publications_added, 0);
+        assert_eq!(delta.publications_removed, 0);
         assert_eq!(delta.send_calls, 1);
         assert_eq!(delta.packets_sent, 1);
         assert_eq!(delta.bytes_sent, b"metrics".len() as u64);
         assert_eq!(delta.send_errors, 0);
+    }
+
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn context_metrics_totals_survive_publication_removal() {
+        let (_receiver, port) = test_multicast_receiver();
+        let mut context = Context::new();
+        let id = context
+            .add_publication(PublicationConfig::new(TEST_GROUP, port))
+            .unwrap();
+
+        context.send(id, b"lifetime").unwrap();
+        let before_removal = context.metrics_snapshot();
+        assert!(context.remove_publication(id));
+
+        let after_removal = context.metrics_snapshot();
+
+        assert_eq!(before_removal.total_packets_sent, 1);
+        assert_eq!(before_removal.total_bytes_sent, b"lifetime".len() as u64);
+        assert_eq!(after_removal.total_packets_sent, 1);
+        assert_eq!(after_removal.total_bytes_sent, b"lifetime".len() as u64);
+        assert_eq!(after_removal.active_publications, 0);
+        assert_eq!(after_removal.publications_removed, 1);
     }
 }
