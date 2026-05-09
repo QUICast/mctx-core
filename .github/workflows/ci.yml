@@ -1,0 +1,34 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            command: cargo test
+          - os: ubuntu-latest
+            command: cargo test --features metrics
+          - os: ubuntu-latest
+            command: cargo test --features tokio
+          - os: macos-latest
+            command: cargo test
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run tests
+        run: ${{ matrix.command }}
+
+  windows-build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build all features on Windows
+        run: cargo test --all-features --no-run
