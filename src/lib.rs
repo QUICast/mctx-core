@@ -3,6 +3,7 @@ pub mod context;
 pub mod error;
 #[cfg(feature = "metrics")]
 pub mod metrics;
+mod platform;
 pub mod publication;
 pub mod report;
 #[cfg(test)]
@@ -10,7 +11,10 @@ mod test_support;
 #[cfg(feature = "tokio")]
 pub mod tokio_adapter;
 
-pub use config::PublicationConfig;
+pub use config::{
+    Ipv6MulticastScope, OutgoingInterface, PublicationAddressFamily, PublicationConfig,
+    is_ipv6_ssm_group,
+};
 pub use context::Context;
 pub use error::MctxError;
 #[cfg(feature = "metrics")]

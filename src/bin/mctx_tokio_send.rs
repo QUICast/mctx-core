@@ -1,36 +1,34 @@
-use mctx_core::{Context, PublicationConfig, TokioPublication};
+#[path = "common/send_args.rs"]
+mod send_args;
+
+use mctx_core::{Context, TokioPublication};
 use std::env;
 use std::error::Error;
-use std::net::Ipv4Addr;
 use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let mut args = env::args().skip(1);
-
-    let group: Ipv4Addr = args.next().ok_or("missing multicast group")?.parse()?;
-    let port: u16 = args.next().ok_or("missing destination port")?.parse()?;
-    let payload = args.next().ok_or("missing payload")?;
-    let count: u64 = args
-        .next()
-        .map(|value| value.parse())
-        .transpose()?
-        .unwrap_or(1);
-    let interval_ms: u64 = args
-        .next()
-        .map(|value| value.parse())
-        .transpose()?
-        .unwrap_or(0);
+    let args: Vec<String> = env::args().collect();
+    let parsed = match send_args::parse_send_cli_args(&args) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            send_args::print_usage(&args[0]);
+            return Err(err.into());
+        }
+    };
 
     let mut context = Context::new();
-    let id = context.add_publication(PublicationConfig::new(group, port))?;
+    let id = context.add_publication(parsed.build_config()?)?;
     let publication = context.take_publication(id).unwrap();
     let publication = TokioPublication::new(publication)?;
-    let interval = Duration::from_millis(interval_ms);
+    let interval = Duration::from_millis(parsed.interval_ms);
 
-    for _ in 0..count {
-        let report = publication.send(payload.as_bytes()).await?;
-        println!("sent {} bytes to {}", report.bytes_sent, report.destination);
+    for _ in 0..parsed.count {
+        let report = publication.send(parsed.payload.as_bytes()).await?;
+        println!(
+            "sent {} bytes to {} from {:?}",
+            report.bytes_sent, report.destination, report.source_addr
+        );
 
         if !interval.is_zero() {
             tokio::time::sleep(interval).await;

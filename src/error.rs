@@ -1,4 +1,4 @@
-use std::{io, net::Ipv4Addr};
+use std::{io, net::IpAddr};
 use thiserror::Error;
 
 /// Errors returned by the multicast sender core.
@@ -8,21 +8,54 @@ pub enum MctxError {
     #[error("MCTX: invalid destination port")]
     InvalidDestinationPort,
 
-    /// The configured group address is not a valid multicast IPv4 address.
-    #[error("MCTX: group must be a multicast IPv4 address")]
+    /// The configured group address is not a valid multicast IP address.
+    #[error("MCTX: group must be a multicast IPv4 or IPv6 address")]
     InvalidMulticastGroup,
 
     /// The configured source port is invalid.
     #[error("MCTX: invalid source port")]
     InvalidSourcePort,
 
-    /// The configured source IPv4 address is invalid.
+    /// The configured source IP address is invalid.
     #[error("MCTX: invalid source address")]
     InvalidSourceAddress,
 
-    /// The configured multicast interface address is invalid.
+    /// The configured multicast interface selector is invalid.
     #[error("MCTX: invalid interface address")]
     InvalidInterfaceAddress,
+
+    /// The configured IPv6 interface index is invalid.
+    #[error("MCTX: invalid IPv6 interface index")]
+    InvalidIpv6InterfaceIndex,
+
+    /// The configured source address does not match the group address family.
+    #[error("MCTX: source address family must match multicast group family")]
+    SourceAddressFamilyMismatch,
+
+    /// The configured outgoing interface does not match the group address family.
+    #[error("MCTX: outgoing interface family must match multicast group family")]
+    OutgoingInterfaceFamilyMismatch,
+
+    /// The configured IPv6 source address and outgoing interface disagree about
+    /// which interface should be used.
+    #[error(
+        "MCTX: IPv6 source address {source_addr} resolves to interface index {source_interface_index}, expected {outgoing_interface_index}"
+    )]
+    Ipv6SourceInterfaceMismatch {
+        source_addr: IpAddr,
+        source_interface_index: u32,
+        outgoing_interface_index: u32,
+    },
+
+    /// A scoped IPv6 multicast destination needs a concrete interface index.
+    #[error(
+        "MCTX: IPv6 interface-local and link-local multicast destinations require an outgoing interface or source address"
+    )]
+    Ipv6ScopedMulticastRequiresInterface,
+
+    /// Resolving a local IPv6 address to its interface index failed.
+    #[error("MCTX: failed to resolve IPv6 interface: {0}")]
+    InterfaceDiscoveryFailed(String),
 
     /// A publication with the same configuration already exists.
     #[error("MCTX: publication already exists")]
@@ -52,20 +85,17 @@ pub enum MctxError {
     #[error("MCTX: failed to read local address from socket: {0}")]
     SocketLocalAddrFailed(io::Error),
 
-    /// The provided existing socket does not match the current IPv4-only send model.
-    #[error("MCTX: existing socket must be an IPv4 UDP socket")]
-    ExistingSocketMustBeIpv4,
+    /// The provided existing socket does not match the configured IP family.
+    #[error("MCTX: existing socket address family does not match the publication")]
+    ExistingSocketAddressFamilyMismatch,
 
     /// The provided existing socket is bound to a different UDP port than requested.
     #[error("MCTX: existing socket is bound to UDP port {actual}, expected {expected}")]
     ExistingSocketPortMismatch { expected: u16, actual: u16 },
 
-    /// The provided existing socket is bound to a different local IPv4 address than requested.
-    #[error("MCTX: existing socket is bound to local IPv4 address {actual}, expected {expected}")]
-    ExistingSocketAddressMismatch {
-        expected: Ipv4Addr,
-        actual: Ipv4Addr,
-    },
+    /// The provided existing socket is bound to a different local IP address than requested.
+    #[error("MCTX: existing socket is bound to local IP address {actual}, expected {expected}")]
+    ExistingSocketAddressMismatch { expected: IpAddr, actual: IpAddr },
 
     /// Sending a packet failed.
     #[error("MCTX: send failed: {0}")]

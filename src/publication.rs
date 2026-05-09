@@ -1,8 +1,12 @@
 #[cfg(feature = "metrics")]
 use crate::metrics::PublicationMetricsSnapshot;
-use crate::{MctxError, PublicationConfig, SendReport};
+use crate::platform::resolve_ipv6_interface_index;
+use crate::{
+    MctxError, SendReport,
+    config::{Ipv6MulticastScope, OutgoingInterface, PublicationConfig, ipv6_destination_scope_id},
+};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, UdpSocket};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, RawFd};
 #[cfg(windows)]
@@ -28,6 +32,7 @@ pub struct Publication {
     id: PublicationId,
     config: PublicationConfig,
     socket: Socket,
+    destination: SocketAddr,
     #[cfg(feature = "metrics")]
     metrics: PublicationMetricsState,
 }
@@ -37,15 +42,20 @@ impl Publication {
     pub fn new(id: PublicationId, config: PublicationConfig) -> Result<Self, MctxError> {
         config.validate()?;
 
-        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
+        let domain = match config.family() {
+            crate::PublicationAddressFamily::Ipv4 => Domain::IPV4,
+            crate::PublicationAddressFamily::Ipv6 => Domain::IPV6,
+        };
+        let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))
             .map_err(MctxError::SocketCreateFailed)?;
 
-        Self::configure_socket(&socket, &config, false)?;
+        let destination = Self::configure_socket(&socket, &config, false)?;
 
         Ok(Self {
             id,
             config,
             socket,
+            destination,
             #[cfg(feature = "metrics")]
             metrics: PublicationMetricsState::default(),
         })
@@ -58,12 +68,13 @@ impl Publication {
         socket: Socket,
     ) -> Result<Self, MctxError> {
         config.validate()?;
-        Self::configure_socket(&socket, &config, true)?;
+        let destination = Self::configure_socket(&socket, &config, true)?;
 
         Ok(Self {
             id,
             config,
             socket,
+            destination,
             #[cfg(feature = "metrics")]
             metrics: PublicationMetricsState::default(),
         })
@@ -88,9 +99,25 @@ impl Publication {
         &self.config
     }
 
-    /// Returns the destination address.
-    pub fn destination(&self) -> SocketAddrV4 {
-        self.config.destination()
+    /// Returns the resolved destination address.
+    pub fn destination(&self) -> SocketAddr {
+        self.destination
+    }
+
+    /// Returns the resolved destination IPv4 address.
+    pub fn destination_v4(&self) -> Result<SocketAddrV4, MctxError> {
+        match self.destination {
+            SocketAddr::V4(destination) => Ok(destination),
+            SocketAddr::V6(_) => Err(MctxError::ExistingSocketAddressFamilyMismatch),
+        }
+    }
+
+    /// Returns the resolved destination IPv6 address.
+    pub fn destination_v6(&self) -> Result<SocketAddrV6, MctxError> {
+        match self.destination {
+            SocketAddr::V4(_) => Err(MctxError::ExistingSocketAddressFamilyMismatch),
+            SocketAddr::V6(destination) => Ok(destination),
+        }
     }
 
     /// Returns a shared reference to the live socket.
@@ -110,13 +137,13 @@ impl Publication {
                 #[cfg(feature = "metrics")]
                 self.metrics.record_success(bytes_sent);
 
-                let local_addr = self.local_addr_v4().ok();
+                let local_addr = self.local_addr().ok();
 
                 Ok(SendReport {
                     publication_id: self.id,
-                    destination: self.destination(),
+                    destination: self.destination,
                     local_addr,
-                    source_addr: local_addr.map(|addr| *addr.ip()),
+                    source_addr: local_addr.map(|addr| addr.ip()),
                     bytes_sent,
                 })
             }
@@ -135,24 +162,36 @@ impl Publication {
             .local_addr()
             .map_err(MctxError::SocketLocalAddrFailed)?
             .as_socket()
-            .ok_or(MctxError::ExistingSocketMustBeIpv4)
+            .ok_or_else(|| {
+                MctxError::SocketLocalAddrFailed(std::io::Error::other(
+                    "socket local address was not an IP address",
+                ))
+            })
     }
 
     /// Returns the publication socket local IPv4 address.
     pub fn local_addr_v4(&self) -> Result<SocketAddrV4, MctxError> {
         match self.local_addr()? {
             SocketAddr::V4(local_addr) => Ok(local_addr),
-            SocketAddr::V6(_) => Err(MctxError::ExistingSocketMustBeIpv4),
+            SocketAddr::V6(_) => Err(MctxError::ExistingSocketAddressFamilyMismatch),
         }
     }
 
-    /// Returns the effective local IPv4 source address.
-    pub fn source_addr(&self) -> Result<Ipv4Addr, MctxError> {
-        Ok(*self.local_addr_v4()?.ip())
+    /// Returns the publication socket local IPv6 address.
+    pub fn local_addr_v6(&self) -> Result<SocketAddrV6, MctxError> {
+        match self.local_addr()? {
+            SocketAddr::V4(_) => Err(MctxError::ExistingSocketAddressFamilyMismatch),
+            SocketAddr::V6(local_addr) => Ok(local_addr),
+        }
+    }
+
+    /// Returns the effective local source address.
+    pub fn source_addr(&self) -> Result<IpAddr, MctxError> {
+        Ok(self.local_addr()?.ip())
     }
 
     /// Returns the `(source, group, udp_port)` tuple needed for announce frames.
-    pub fn announce_tuple(&self) -> Result<(Ipv4Addr, Ipv4Addr, u16), MctxError> {
+    pub fn announce_tuple(&self) -> Result<(IpAddr, IpAddr, u16), MctxError> {
         Ok((self.source_addr()?, self.config.group, self.config.dst_port))
     }
 
@@ -180,7 +219,7 @@ impl Publication {
         socket: &Socket,
         config: &PublicationConfig,
         existing_socket: bool,
-    ) -> Result<(), MctxError> {
+    ) -> Result<SocketAddr, MctxError> {
         if existing_socket {
             Self::validate_existing_socket(socket, config)?;
         }
@@ -189,11 +228,28 @@ impl Publication {
             .set_nonblocking(true)
             .map_err(MctxError::SocketOptionFailed)?;
 
-        if let Some(bind_addr) = config.bind_addr() {
-            Self::bind_if_needed(socket, bind_addr)?;
+        match config.family() {
+            crate::PublicationAddressFamily::Ipv4 => Self::configure_socket_v4(socket, config),
+            crate::PublicationAddressFamily::Ipv6 => {
+                if !existing_socket {
+                    socket
+                        .set_only_v6(true)
+                        .map_err(MctxError::SocketOptionFailed)?;
+                }
+                Self::configure_socket_v6(socket, config)
+            }
+        }
+    }
+
+    fn configure_socket_v4(
+        socket: &Socket,
+        config: &PublicationConfig,
+    ) -> Result<SocketAddr, MctxError> {
+        if let Some(bind_addr) = Self::bind_addr_v4(config) {
+            Self::bind_if_needed(socket, SocketAddr::V4(bind_addr))?;
         }
 
-        if let Some(interface) = config.interface {
+        if let Some(OutgoingInterface::Ipv4Addr(interface)) = config.outgoing_interface {
             socket
                 .set_multicast_if_v4(&interface)
                 .map_err(MctxError::SocketOptionFailed)?;
@@ -205,11 +261,81 @@ impl Publication {
         socket
             .set_multicast_ttl_v4(config.ttl)
             .map_err(MctxError::SocketOptionFailed)?;
+
+        let destination = SocketAddrV4::new(Self::group_v4(config), config.dst_port);
         socket
-            .connect(&SockAddr::from(config.destination()))
+            .connect(&SockAddr::from(destination))
             .map_err(MctxError::SocketConnectFailed)?;
 
-        Ok(())
+        Ok(SocketAddr::V4(destination))
+    }
+
+    fn configure_socket_v6(
+        socket: &Socket,
+        config: &PublicationConfig,
+    ) -> Result<SocketAddr, MctxError> {
+        let group = Self::group_v6(config);
+        let explicit_source = Self::source_addr_v6(config);
+        let interface_addr = Self::interface_addr_v6(config);
+        let explicit_interface_index = Self::explicit_interface_index_v6(config, interface_addr)?;
+        let source_interface_index = explicit_source
+            .map(resolve_ipv6_interface_index)
+            .transpose()?;
+
+        if let (Some(source), Some(source_interface_index), Some(outgoing_interface_index)) = (
+            explicit_source,
+            source_interface_index,
+            explicit_interface_index,
+        ) && source_interface_index != outgoing_interface_index
+        {
+            return Err(MctxError::Ipv6SourceInterfaceMismatch {
+                source_addr: IpAddr::V6(source),
+                source_interface_index,
+                outgoing_interface_index,
+            });
+        }
+
+        let effective_interface_index = explicit_interface_index.or(source_interface_index);
+        let bind_source = explicit_source.or(interface_addr);
+        let bind_scope_id = match bind_source {
+            Some(source) if source.is_unicast_link_local() => effective_interface_index
+                .ok_or_else(|| {
+                    MctxError::InterfaceDiscoveryFailed(format!(
+                        "failed to determine interface index for link-local IPv6 address {source}"
+                    ))
+                })?,
+            _ => 0,
+        };
+
+        if let Some(bind_addr) = Self::bind_addr_v6(config, bind_source, bind_scope_id) {
+            Self::bind_if_needed(socket, SocketAddr::V6(bind_addr))?;
+        }
+
+        if let Some(interface_index) = effective_interface_index {
+            socket
+                .set_multicast_if_v6(interface_index)
+                .map_err(MctxError::SocketOptionFailed)?;
+        }
+
+        socket
+            .set_multicast_loop_v6(config.loopback)
+            .map_err(MctxError::SocketOptionFailed)?;
+        socket
+            .set_multicast_hops_v6(config.ttl)
+            .map_err(MctxError::SocketOptionFailed)?;
+
+        let destination_scope_id = match config.ipv6_scope() {
+            Some(Ipv6MulticastScope::InterfaceLocal | Ipv6MulticastScope::LinkLocal) => {
+                effective_interface_index.ok_or(MctxError::Ipv6ScopedMulticastRequiresInterface)?
+            }
+            _ => ipv6_destination_scope_id(group, effective_interface_index.unwrap_or(0)),
+        };
+        let destination = SocketAddrV6::new(group, config.dst_port, 0, destination_scope_id);
+        socket
+            .connect(&SockAddr::from(destination))
+            .map_err(MctxError::SocketConnectFailed)?;
+
+        Ok(SocketAddr::V6(destination))
     }
 
     fn validate_existing_socket(
@@ -222,13 +348,17 @@ impl Publication {
 
         match local_addr.as_socket() {
             Some(SocketAddr::V4(local_v4)) => {
-                if let Some(expected) = config.source_addr
+                if config.is_ipv6() {
+                    return Err(MctxError::ExistingSocketAddressFamilyMismatch);
+                }
+
+                if let Some(IpAddr::V4(expected)) = config.source_addr
                     && local_v4.ip() != &Ipv4Addr::UNSPECIFIED
                     && local_v4.ip() != &expected
                 {
                     return Err(MctxError::ExistingSocketAddressMismatch {
-                        expected,
-                        actual: *local_v4.ip(),
+                        expected: IpAddr::V4(expected),
+                        actual: IpAddr::V4(*local_v4.ip()),
                     });
                 }
 
@@ -244,15 +374,42 @@ impl Publication {
 
                 Ok(())
             }
-            Some(SocketAddr::V6(_)) | None => Err(MctxError::ExistingSocketMustBeIpv4),
+            Some(SocketAddr::V6(local_v6)) => {
+                if config.is_ipv4() {
+                    return Err(MctxError::ExistingSocketAddressFamilyMismatch);
+                }
+
+                if let Some(IpAddr::V6(expected)) = config.source_addr
+                    && local_v6.ip() != &Ipv6Addr::UNSPECIFIED
+                    && local_v6.ip() != &expected
+                {
+                    return Err(MctxError::ExistingSocketAddressMismatch {
+                        expected: IpAddr::V6(expected),
+                        actual: IpAddr::V6(*local_v6.ip()),
+                    });
+                }
+
+                if let Some(expected) = config.source_port
+                    && local_v6.port() != 0
+                    && local_v6.port() != expected
+                {
+                    return Err(MctxError::ExistingSocketPortMismatch {
+                        expected,
+                        actual: local_v6.port(),
+                    });
+                }
+
+                Ok(())
+            }
+            None => Err(MctxError::ExistingSocketAddressFamilyMismatch),
         }
     }
 
-    fn bind_if_needed(socket: &Socket, bind_addr: SocketAddrV4) -> Result<(), MctxError> {
+    fn bind_if_needed(socket: &Socket, bind_addr: SocketAddr) -> Result<(), MctxError> {
         let needs_bind = match socket.local_addr() {
             Ok(local_addr) => match local_addr.as_socket() {
-                Some(SocketAddr::V4(local_v4)) => local_v4 != bind_addr,
-                Some(SocketAddr::V6(_)) | None => return Err(MctxError::ExistingSocketMustBeIpv4),
+                Some(local_addr) => local_addr != bind_addr,
+                None => return Err(MctxError::ExistingSocketAddressFamilyMismatch),
             },
             Err(_) => true,
         };
@@ -264,6 +421,82 @@ impl Publication {
         }
 
         Ok(())
+    }
+
+    fn bind_addr_v4(config: &PublicationConfig) -> Option<SocketAddrV4> {
+        if config.source_addr.is_none() && config.source_port.is_none() {
+            return None;
+        }
+
+        Some(SocketAddrV4::new(
+            match config.source_addr {
+                Some(IpAddr::V4(source_addr)) => source_addr,
+                Some(IpAddr::V6(_)) => unreachable!("validated as IPv4"),
+                None => Ipv4Addr::UNSPECIFIED,
+            },
+            config.source_port.unwrap_or(0),
+        ))
+    }
+
+    fn bind_addr_v6(
+        config: &PublicationConfig,
+        bind_source: Option<Ipv6Addr>,
+        bind_scope_id: u32,
+    ) -> Option<SocketAddrV6> {
+        if bind_source.is_none() && config.source_port.is_none() {
+            return None;
+        }
+
+        Some(SocketAddrV6::new(
+            bind_source.unwrap_or(Ipv6Addr::UNSPECIFIED),
+            config.source_port.unwrap_or(0),
+            0,
+            bind_scope_id,
+        ))
+    }
+
+    fn group_v4(config: &PublicationConfig) -> Ipv4Addr {
+        match config.group {
+            IpAddr::V4(group) => group,
+            IpAddr::V6(_) => unreachable!("validated as IPv4"),
+        }
+    }
+
+    fn group_v6(config: &PublicationConfig) -> Ipv6Addr {
+        match config.group {
+            IpAddr::V4(_) => unreachable!("validated as IPv6"),
+            IpAddr::V6(group) => group,
+        }
+    }
+
+    fn source_addr_v6(config: &PublicationConfig) -> Option<Ipv6Addr> {
+        match config.source_addr {
+            Some(IpAddr::V4(_)) => unreachable!("validated as IPv6"),
+            Some(IpAddr::V6(source)) => Some(source),
+            None => None,
+        }
+    }
+
+    fn interface_addr_v6(config: &PublicationConfig) -> Option<Ipv6Addr> {
+        match config.outgoing_interface {
+            Some(OutgoingInterface::Ipv4Addr(_)) => unreachable!("validated as IPv6"),
+            Some(OutgoingInterface::Ipv6Addr(interface)) => Some(interface),
+            Some(OutgoingInterface::Ipv6Index(_)) | None => None,
+        }
+    }
+
+    fn explicit_interface_index_v6(
+        config: &PublicationConfig,
+        interface_addr: Option<Ipv6Addr>,
+    ) -> Result<Option<u32>, MctxError> {
+        match config.outgoing_interface {
+            Some(OutgoingInterface::Ipv4Addr(_)) => unreachable!("validated as IPv6"),
+            Some(OutgoingInterface::Ipv6Index(index)) => Ok(Some(index)),
+            Some(OutgoingInterface::Ipv6Addr(_)) => {
+                interface_addr.map(resolve_ipv6_interface_index).transpose()
+            }
+            None => Ok(None),
+        }
     }
 }
 
@@ -325,7 +558,10 @@ mod tests {
     use super::*;
     #[cfg(feature = "metrics")]
     use crate::metrics::PublicationMetricsSampler;
-    use crate::test_support::{TEST_GROUP, recv_payload, test_multicast_receiver};
+    use crate::test_support::{
+        TEST_GROUP, TEST_GROUP_V6_GLOBAL, TEST_GROUP_V6_SAME_HOST, recv_payload,
+        recv_payload_with_source, test_multicast_receiver, test_multicast_receiver_v6,
+    };
     use socket2::{Domain, Protocol, SockAddr, Type};
 
     #[test]
@@ -338,12 +574,75 @@ mod tests {
         let payload = recv_payload(&receiver);
         let announce = publication.announce_tuple().unwrap();
 
-        assert_eq!(report.destination, SocketAddrV4::new(TEST_GROUP, port));
+        assert_eq!(
+            report.destination,
+            SocketAddr::V4(SocketAddrV4::new(TEST_GROUP, port))
+        );
         assert!(report.local_addr.is_some());
-        assert_eq!(report.source_addr, report.local_addr.map(|addr| *addr.ip()));
-        assert_eq!(announce.1, TEST_GROUP);
+        assert_eq!(report.source_addr, report.local_addr.map(|addr| addr.ip()));
+        assert_eq!(announce.1, IpAddr::V4(TEST_GROUP));
         assert_eq!(announce.2, port);
         assert_eq!(payload, b"hello multicast");
+    }
+
+    #[test]
+    fn publication_send_reaches_a_local_ipv6_receiver_with_configured_source() {
+        let interface = Ipv6Addr::LOCALHOST;
+        let source = Ipv6Addr::LOCALHOST;
+        let (receiver, port) = test_multicast_receiver_v6(TEST_GROUP_V6_SAME_HOST, interface);
+        let publication = Publication::new(
+            PublicationId(1),
+            PublicationConfig::new(TEST_GROUP_V6_SAME_HOST, port)
+                .with_source_addr(source)
+                .with_outgoing_interface(interface),
+        )
+        .unwrap();
+
+        let report = publication.send(b"hello multicast v6").unwrap();
+        let (payload, sender) = recv_payload_with_source(&receiver);
+
+        assert_eq!(
+            report.destination,
+            SocketAddr::V6(SocketAddrV6::new(
+                TEST_GROUP_V6_SAME_HOST,
+                port,
+                0,
+                publication.destination_v6().unwrap().scope_id()
+            ))
+        );
+        assert_eq!(report.source_addr, Some(IpAddr::V6(source)));
+        assert_eq!(sender.ip(), IpAddr::V6(source));
+        assert_eq!(payload, b"hello multicast v6");
+    }
+
+    #[test]
+    fn ipv6_interface_address_auto_binds_the_sender_source() {
+        let interface = Ipv6Addr::LOCALHOST;
+        let (receiver, port) = test_multicast_receiver_v6(TEST_GROUP_V6_SAME_HOST, interface);
+        let publication = Publication::new(
+            PublicationId(1),
+            PublicationConfig::new(TEST_GROUP_V6_SAME_HOST, port)
+                .with_outgoing_interface(interface),
+        )
+        .unwrap();
+
+        let report = publication.send(b"auto-bind v6").unwrap();
+        let (_payload, sender) = recv_payload_with_source(&receiver);
+
+        assert_eq!(report.source_addr, Some(IpAddr::V6(interface)));
+        assert_eq!(sender.ip(), IpAddr::V6(interface));
+    }
+
+    #[test]
+    fn wider_scope_ipv6_group_clears_destination_scope_id() {
+        let publication = Publication::new(
+            PublicationId(1),
+            PublicationConfig::new(TEST_GROUP_V6_GLOBAL, 5000)
+                .with_source_addr(Ipv6Addr::LOCALHOST),
+        )
+        .unwrap();
+
+        assert_eq!(publication.destination_v6().unwrap().scope_id(), 0);
     }
 
     #[cfg(feature = "metrics")]
@@ -388,11 +687,9 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(MctxError::ExistingSocketAddressMismatch {
-                expected,
-                actual
-            }) if expected == Ipv4Addr::new(127, 0, 0, 2)
-                && actual == Ipv4Addr::new(127, 0, 0, 1)
+            Err(MctxError::ExistingSocketAddressMismatch { expected, actual })
+                if expected == IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))
+                    && actual == IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))
         ));
     }
 }

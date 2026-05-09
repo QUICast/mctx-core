@@ -3,12 +3,12 @@ name = "mctx-core"
 version = "0.1.2"
 edition = "2024"
 license = "BSD-2-Clause"
-description = "Runtime-agnostic and portable IPv4 multicast sender library."
+description = "Runtime-agnostic and portable IPv4 and IPv6 multicast sender library."
 readme = "README.md"
 repository = "https://github.com/QUICast/mctx-core"
 homepage = "https://github.com/QUICast/mctx-core"
 documentation = "https://docs.rs/mctx-core"
-keywords = ["multicast", "udp", "networking", "sender", "asm"]
+keywords = ["multicast", "udp", "networking", "sender", "ssm"]
 categories = ["network-programming"]
 
 [features]
@@ -20,6 +20,10 @@ tokio = ["dep:tokio"]
 socket2 = "0.6.3"
 thiserror = "2.0.18"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time"], optional = true }
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock"] }
 
 [[bin]]
 name = "mctx_tokio_send"
