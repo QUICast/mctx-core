@@ -44,6 +44,15 @@ cargo run --bin mctx_send -- ff32::8000:1234 5000 hello-v6 --source fe80::1234 -
 cargo run --bin mctx_send -- 239.1.2.3 5000 hello 100 10
 ```
 
+## Sender Metrics JSONL
+
+```bash
+MCTX_METRICS_SUMMARY_FILE=results/sender-0001/network.jsonl \
+MCTX_METRICS_SUMMARY_SECS=1 \
+MCTX_METRICS_FLAGS_JSON='{"experiment":"baseline","integrity_hash_algorithm":"sha256"}' \
+cargo run --features metrics --bin mctx_send -- 239.1.2.3 5000 hello 100 10
+```
+
 ## Tokio Variant
 
 ```bash

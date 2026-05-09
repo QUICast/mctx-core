@@ -241,6 +241,18 @@ println!("packets sent: {}", metrics.packets_sent);
 println!("bytes sent: {}", metrics.bytes_sent);
 ```
 
+`mctx_send` also supports Heimdall-style single-header JSONL output:
+
+```bash
+MCTX_METRICS_SUMMARY_FILE=results/sender-0001/network.jsonl \
+MCTX_METRICS_SUMMARY_SECS=1 \
+cargo run --features metrics --bin mctx_send -- 239.1.2.3 5000 hello 100 10
+```
+
+`node_id` defaults to the parent directory of the output path, then the file
+stem, and the header `flags` map can be extended with
+`MCTX_METRICS_FLAGS_JSON='{"experiment":"baseline"}'`.
+
 ## Documentation
 
 - [Usage Guide](docs/usage.md)

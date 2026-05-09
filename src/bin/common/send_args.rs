@@ -178,7 +178,7 @@ pub(crate) fn parse_send_cli_args(args: &[String]) -> Result<SendCliArgs, String
     Ok(parsed)
 }
 
-pub(crate) fn print_usage(program: &str) {
+pub(crate) fn print_usage(program: &str, _show_metrics: bool) {
     eprintln!("Usage:");
     eprintln!(
         "  {program} <group> <dst_port> <payload> [count] [interval_ms] [--source <ip>] [--source-port <port>] [--bind <ip:port>] [--interface <ip>] [--interface-index <idx>] [--ttl <ttl>] [--no-loopback]"
@@ -203,6 +203,24 @@ pub(crate) fn print_usage(program: &str) {
     eprintln!(
         "  - ff3e::/16 is global scope; keep destination scope_id at 0 and rely on the bound source plus multicast interface selection"
     );
+
+    #[cfg(feature = "metrics")]
+    if _show_metrics {
+        eprintln!();
+        eprintln!("Metrics (when built with --features metrics):");
+        eprintln!(
+            "  MCTX_METRICS_SUMMARY_SECS=<n>   emit a delta sender metrics summary every n seconds"
+        );
+        eprintln!(
+            "  MCTX_METRICS_NODE_ID=<id>       override JSONL header node_id (defaults to parent dir, then file stem)"
+        );
+        eprintln!(
+            "  MCTX_METRICS_FLAGS_JSON=<json>  merge extra JSON object fields into the header flags map"
+        );
+        eprintln!(
+            "  MCTX_METRICS_SUMMARY_FILE=<p>   write single-header JSONL sender network metrics to <p>"
+        );
+    }
 }
 
 fn parse_value<T>(args: &[String], index: usize, flag: &str) -> Result<T, String>

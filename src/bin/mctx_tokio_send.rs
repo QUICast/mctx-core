@@ -12,7 +12,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let parsed = match send_args::parse_send_cli_args(&args) {
         Ok(parsed) => parsed,
         Err(err) => {
-            send_args::print_usage(&args[0]);
+            send_args::print_usage(&args[0], false);
             return Err(err.into());
         }
     };
