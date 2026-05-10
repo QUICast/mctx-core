@@ -11,6 +11,9 @@ documentation = "https://docs.rs/mctx-core"
 keywords = ["multicast", "udp", "networking", "sender", "ssm"]
 categories = ["network-programming"]
 
+[workspace]
+members = ["mctx-core-py"]
+
 [features]
 default = []
 metrics = ["dep:serde_json"]

@@ -115,3 +115,11 @@ link-local multicast destinations. Wider-scope groups such as `ff35`,
 
 If you already manage sockets externally, use
 `add_publication_with_socket(...)` or `add_publication_with_udp_socket(...)`.
+
+## Python Bindings
+
+If you want to drive the sender from Python, build the sibling `mctx-core-py`
+crate. It exposes `Context`, `Publication`, `SendReport`, and a small
+`AsyncPublication` helper.
+
+Build and packaging details live in [Python Bindings](python.md).

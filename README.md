@@ -20,6 +20,7 @@ metrics add-ons.
 - Caller-provided socket support
 - Optional Tokio adapter via the `tokio` feature
 - Optional send metrics via the `metrics` feature
+- Optional Python bindings via the sibling `mctx-core-py` crate
 
 ## Install
 
@@ -38,6 +39,9 @@ With optional metrics:
 ```bash
 cargo add mctx-core --features metrics
 ```
+
+Python bindings are available in
+[`mctx-core-py`](mctx-core-py/README.md).
 
 ## Quick Start
 
@@ -258,6 +262,7 @@ stem, and the header `flags` map can be extended with
 - [Usage Guide](docs/usage.md)
 - [Architecture](docs/architecture.md)
 - [Demo Binaries](docs/demo.md)
+- [Python Bindings](docs/python.md)
 - [Metrics](docs/metrics.md)
 - [Design Decisions](docs/design-decisions.md)
 

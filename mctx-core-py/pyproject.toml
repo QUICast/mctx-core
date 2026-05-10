@@ -1,0 +1,24 @@
+[build-system]
+requires = ["maturin>=1.8,<2"]
+build-backend = "maturin"
+
+[project]
+name = "mctx-core-py"
+description = "Python bindings for the mctx-core multicast sender library."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "BSD-2-Clause" }
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: BSD License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Rust",
+  "Topic :: Internet",
+  "Topic :: System :: Networking",
+]
+dynamic = ["version"]
+
+[tool.maturin]
+module-name = "mctx_core._mctx_core"
+python-source = "python"
