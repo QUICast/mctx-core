@@ -11,6 +11,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV
 use std::os::fd::{AsRawFd, RawFd};
 #[cfg(windows)]
 use std::os::windows::io::{AsRawSocket, RawSocket};
+use std::sync::OnceLock;
 #[cfg(feature = "metrics")]
 use std::time::SystemTime;
 
@@ -33,6 +34,7 @@ pub struct Publication {
     config: PublicationConfig,
     socket: Socket,
     destination: SocketAddr,
+    cached_local_addr: OnceLock<SocketAddr>,
     #[cfg(feature = "metrics")]
     metrics: PublicationMetricsState,
 }
@@ -56,6 +58,7 @@ impl Publication {
             config,
             socket,
             destination,
+            cached_local_addr: OnceLock::new(),
             #[cfg(feature = "metrics")]
             metrics: PublicationMetricsState::default(),
         })
@@ -75,6 +78,7 @@ impl Publication {
             config,
             socket,
             destination,
+            cached_local_addr: OnceLock::new(),
             #[cfg(feature = "metrics")]
             metrics: PublicationMetricsState::default(),
         })
@@ -121,12 +125,21 @@ impl Publication {
     }
 
     /// Returns a shared reference to the live socket.
+    ///
+    /// Avoid rebinding or reconnecting the socket through this handle. The
+    /// publication caches its resolved local address after the first lookup for
+    /// send reporting, and shared-reference socket mutation cannot invalidate
+    /// that cache.
     pub fn socket(&self) -> &Socket {
         &self.socket
     }
 
     /// Returns a mutable reference to the live socket.
+    ///
+    /// This clears any cached local-address metadata before handing the socket
+    /// out so the next send or `local_addr()` call refreshes it.
     pub fn socket_mut(&mut self) -> &mut Socket {
+        self.cached_local_addr = OnceLock::new();
         &mut self.socket
     }
 
@@ -137,7 +150,7 @@ impl Publication {
                 #[cfg(feature = "metrics")]
                 self.metrics.record_success(bytes_sent);
 
-                let local_addr = self.local_addr().ok();
+                let local_addr = self.cached_local_addr().ok();
 
                 Ok(SendReport {
                     publication_id: self.id,
@@ -158,7 +171,21 @@ impl Publication {
 
     /// Returns the publication socket local address.
     pub fn local_addr(&self) -> Result<SocketAddr, MctxError> {
-        self.socket
+        self.cached_local_addr()
+    }
+
+    fn cached_local_addr(&self) -> Result<SocketAddr, MctxError> {
+        if let Some(local_addr) = self.cached_local_addr.get() {
+            return Ok(*local_addr);
+        }
+
+        let local_addr = Self::read_local_addr(&self.socket)?;
+        let _ = self.cached_local_addr.set(local_addr);
+        Ok(local_addr)
+    }
+
+    fn read_local_addr(socket: &Socket) -> Result<SocketAddr, MctxError> {
+        socket
             .local_addr()
             .map_err(MctxError::SocketLocalAddrFailed)?
             .as_socket()

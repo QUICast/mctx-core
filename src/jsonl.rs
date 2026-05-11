@@ -106,36 +106,55 @@ pub fn first_non_empty_line(path: &Path) -> Result<Option<String>, std::io::Erro
 /// Validates the existing first non-empty JSONL line as a Heimdall header.
 #[cfg(feature = "metrics")]
 pub fn validate_existing_header(path: &Path) -> Result<Option<Value>, std::io::Error> {
-    let Some(line) = first_non_empty_line(path)? else {
-        return Ok(None);
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err),
     };
 
-    let parsed: Value = serde_json::from_str(&line).map_err(|err| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("existing JSONL header is invalid JSON: {err}"),
-        )
-    })?;
+    let mut non_empty_line_index = 0usize;
+    let mut parsed_header = None;
 
-    let schema = parsed.get("schema").and_then(Value::as_str);
-    let artifact_type = parsed.get("artifact_type").and_then(Value::as_str);
-    let node_id = parsed.get("node_id").and_then(Value::as_str);
-    let producer = parsed.get("producer").and_then(Value::as_str);
-    let flags = parsed.get("flags");
+    for line in BufReader::new(file).lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
 
-    if schema != Some(HEIMDALL_JSONL_SCHEMA)
-        || artifact_type.is_none()
-        || node_id.is_none()
-        || producer.is_none()
-        || !matches!(flags, Some(Value::Object(_)))
-    {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "existing JSONL file does not start with a Heimdall header object",
-        ));
+        non_empty_line_index += 1;
+        let parsed = serde_json::from_str::<Value>(&line).map_err(|err| {
+            let message = if non_empty_line_index == 1 {
+                format!("existing JSONL header is invalid JSON: {err}")
+            } else {
+                format!(
+                    "existing JSONL sample line {} is invalid JSON: {err}",
+                    non_empty_line_index
+                )
+            };
+            std::io::Error::new(std::io::ErrorKind::InvalidData, message)
+        })?;
+
+        if non_empty_line_index == 1 {
+            if !is_header_object(&parsed) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "existing JSONL file does not start with a Heimdall header object",
+                ));
+            }
+
+            parsed_header = Some(parsed);
+            continue;
+        }
+
+        if is_header_object(&parsed) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "existing JSONL file contains more than one Heimdall header object",
+            ));
+        }
     }
 
-    Ok(Some(parsed))
+    Ok(parsed_header)
 }
 
 /// Ensures a JSONL file has exactly one header at the top before samples.
@@ -187,6 +206,21 @@ fn headers_are_compatible(existing: &Value, expected: &Value) -> bool {
     comparable_keys
         .into_iter()
         .all(|key| existing.get(key) == expected.get(key))
+}
+
+#[cfg(feature = "metrics")]
+fn is_header_object(value: &Value) -> bool {
+    let schema = value.get("schema").and_then(Value::as_str);
+    let artifact_type = value.get("artifact_type").and_then(Value::as_str);
+    let node_id = value.get("node_id").and_then(Value::as_str);
+    let producer = value.get("producer").and_then(Value::as_str);
+    let flags = value.get("flags");
+
+    schema == Some(HEIMDALL_JSONL_SCHEMA)
+        && artifact_type.is_some()
+        && node_id.is_some()
+        && producer.is_some()
+        && matches!(flags, Some(Value::Object(_)))
 }
 
 #[cfg(all(test, feature = "metrics"))]
@@ -305,6 +339,38 @@ mod tests {
         let err =
             append_jsonl_sample_row(&path, &header2, &json!({"ts": 2.0, "interval_secs": 1.0}))
                 .unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn additional_header_line_is_rejected() {
+        let path = std::env::temp_dir().join(format!(
+            "mctx_extra_header_{}.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::ZERO)
+                .as_nanos()
+        ));
+        let header = json!({
+            "schema": HEIMDALL_JSONL_SCHEMA,
+            "artifact_type": NETWORK_ARTIFACT_TYPE,
+            "node_id": "sender-a",
+            "producer": "mctx-core/test",
+            "created_at": 1.0,
+            "flags": {"role": "sender"},
+        });
+        let contents = format!(
+            "{}\n{}\n{}\n",
+            serde_json::to_string(&header).unwrap(),
+            serde_json::to_string(&json!({"ts": 1.0, "interval_secs": 1.0})).unwrap(),
+            serde_json::to_string(&header).unwrap(),
+        );
+        fs::write(&path, contents).unwrap();
+
+        let err = validate_existing_header(&path).unwrap_err();
 
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
 
