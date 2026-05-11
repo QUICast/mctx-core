@@ -190,6 +190,15 @@ impl PublicationConfig {
         let bind_addr = bind_addr.into();
         self.source_addr = Some(bind_addr.ip());
         self.source_port = Some(bind_addr.port());
+
+        // Preserve an explicit IPv6 scope ID from scoped bind addresses so
+        // link-local senders keep their interface identity through socket setup.
+        if let SocketAddr::V6(bind_addr_v6) = bind_addr
+            && bind_addr_v6.scope_id() != 0
+        {
+            self.outgoing_interface = Some(OutgoingInterface::Ipv6Index(bind_addr_v6.scope_id()));
+        }
+
         self
     }
 
@@ -366,6 +375,18 @@ mod tests {
             Some(IpAddr::V6("fd00::10".parse::<Ipv6Addr>().unwrap()))
         );
         assert_eq!(cfg.source_port, Some(5001));
+    }
+
+    #[test]
+    fn bind_addr_builder_preserves_ipv6_scope_as_interface_index() {
+        let bind_addr = SocketAddrV6::new("fe80::1234".parse().unwrap(), 5001, 0, 7);
+        let cfg = PublicationConfig::new("ff32::8000:1234".parse::<Ipv6Addr>().unwrap(), 5000)
+            .with_bind_addr(bind_addr);
+
+        assert_eq!(
+            cfg.outgoing_interface,
+            Some(OutgoingInterface::Ipv6Index(7))
+        );
     }
 
     #[test]

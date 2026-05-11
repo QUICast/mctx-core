@@ -174,7 +174,7 @@ fn build_sender_metrics_flags(
     flags.insert("publish_interval_ms".to_string(), json!(parsed.interval_ms));
     flags.insert(
         "chunk_payload_bytes".to_string(),
-        json!(parsed.payload.as_bytes().len()),
+        json!(parsed.payload.len()),
     );
     flags.insert(
         "pacing".to_string(),

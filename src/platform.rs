@@ -3,6 +3,12 @@ use std::net::Ipv6Addr;
 
 #[cfg(unix)]
 pub(crate) fn resolve_ipv6_interface_index(interface: Ipv6Addr) -> Result<u32, MctxError> {
+    fn ambiguous_interface_error(interface: Ipv6Addr, first: u32, second: u32) -> MctxError {
+        MctxError::InterfaceDiscoveryFailed(format!(
+            "IPv6 interface address {interface} is ambiguous across interface indices {first} and {second}; provide an explicit interface index or scoped bind address"
+        ))
+    }
+
     unsafe {
         let mut ifaddrs = std::ptr::null_mut();
         if libc::getifaddrs(&mut ifaddrs) != 0 {
@@ -22,8 +28,14 @@ pub(crate) fn resolve_ipv6_interface_index(interface: Ipv6Addr) -> Result<u32, M
                 if Ipv6Addr::from(sockaddr.sin6_addr.s6_addr) == interface {
                     let index = libc::if_nametoindex((*cursor).ifa_name);
                     if index != 0 {
-                        matched_index = Some(index);
-                        break;
+                        match matched_index {
+                            Some(existing) if existing != index => {
+                                libc::freeifaddrs(ifaddrs);
+                                return Err(ambiguous_interface_error(interface, existing, index));
+                            }
+                            Some(_) => {}
+                            None => matched_index = Some(index),
+                        }
                     }
                 }
             }
@@ -51,6 +63,12 @@ pub(crate) fn resolve_ipv6_interface_index(interface: Ipv6Addr) -> Result<u32, M
 
     const INITIAL_BUFFER_SIZE: usize = 15_000;
 
+    fn ambiguous_interface_error(interface: Ipv6Addr, first: u32, second: u32) -> MctxError {
+        MctxError::InterfaceDiscoveryFailed(format!(
+            "IPv6 interface address {interface} is ambiguous across interface indices {first} and {second}; provide an explicit interface index or scoped bind address"
+        ))
+    }
+
     let mut buf_len = INITIAL_BUFFER_SIZE as u32;
 
     loop {
@@ -76,6 +94,7 @@ pub(crate) fn resolve_ipv6_interface_index(interface: Ipv6Addr) -> Result<u32, M
         }
 
         let mut adapter = buffer.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>();
+        let mut matched_index = None;
 
         unsafe {
             while !adapter.is_null() {
@@ -90,7 +109,17 @@ pub(crate) fn resolve_ipv6_interface_index(interface: Ipv6Addr) -> Result<u32, M
                         let sockaddr = &*(socket_address.lpSockaddr as *const SOCKADDR_IN6);
                         let candidate = Ipv6Addr::from(sockaddr.sin6_addr.u.Byte);
                         if candidate == interface {
-                            return Ok((*adapter).Ipv6IfIndex);
+                            match matched_index {
+                                Some(existing) if existing != (*adapter).Ipv6IfIndex => {
+                                    return Err(ambiguous_interface_error(
+                                        interface,
+                                        existing,
+                                        (*adapter).Ipv6IfIndex,
+                                    ));
+                                }
+                                Some(_) => {}
+                                None => matched_index = Some((*adapter).Ipv6IfIndex),
+                            }
                         }
                     }
 
@@ -101,9 +130,11 @@ pub(crate) fn resolve_ipv6_interface_index(interface: Ipv6Addr) -> Result<u32, M
             }
         }
 
-        return Err(MctxError::InterfaceDiscoveryFailed(format!(
-            "failed to resolve IPv6 interface address {interface} to an interface index"
-        )));
+        return matched_index.ok_or_else(|| {
+            MctxError::InterfaceDiscoveryFailed(format!(
+                "failed to resolve IPv6 interface address {interface} to an interface index"
+            ))
+        });
     }
 }
 

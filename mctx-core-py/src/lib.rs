@@ -55,6 +55,7 @@ fn publication_not_found(publication_id: u64) -> PyErr {
     PyLookupError::new_err(format!("mctx_core publication {publication_id} not found"))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_publication_config(
     group: &str,
     dst_port: u16,
@@ -218,6 +219,7 @@ impl PyContext {
     }
 
     #[pyo3(signature = (group, dst_port, source=None, source_port=None, bind=None, interface=None, interface_index=None, ttl=1, loopback=true))]
+    #[allow(clippy::too_many_arguments)]
     fn add_publication(
         &self,
         py: Python<'_>,

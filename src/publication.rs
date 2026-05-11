@@ -278,9 +278,14 @@ impl Publication {
         let explicit_source = Self::source_addr_v6(config);
         let interface_addr = Self::interface_addr_v6(config);
         let explicit_interface_index = Self::explicit_interface_index_v6(config, interface_addr)?;
-        let source_interface_index = explicit_source
-            .map(resolve_ipv6_interface_index)
-            .transpose()?;
+        let source_interface_index = match explicit_source {
+            Some(source) if source.is_unicast_link_local() => match explicit_interface_index {
+                Some(interface_index) => Some(interface_index),
+                None => Some(resolve_ipv6_interface_index(source)?),
+            },
+            Some(source) => Some(resolve_ipv6_interface_index(source)?),
+            None => None,
+        };
 
         if let (Some(source), Some(source_interface_index), Some(outgoing_interface_index)) = (
             explicit_source,

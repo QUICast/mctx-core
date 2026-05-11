@@ -3,9 +3,11 @@ use serde_json::{Map, Value, json};
 #[cfg(feature = "metrics")]
 use std::fs;
 #[cfg(feature = "metrics")]
+use std::fs::File;
+#[cfg(feature = "metrics")]
 use std::fs::OpenOptions;
 #[cfg(feature = "metrics")]
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 #[cfg(feature = "metrics")]
 use std::path::{Path, PathBuf};
 #[cfg(feature = "metrics")]
@@ -84,16 +86,21 @@ pub fn header_json(
 /// Returns the first non-empty line from a JSONL file, if any.
 #[cfg(feature = "metrics")]
 pub fn first_non_empty_line(path: &Path) -> Result<Option<String>, std::io::Error> {
-    let contents = match fs::read_to_string(path) {
-        Ok(contents) => contents,
+    let file = match File::open(path) {
+        Ok(file) => file,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(err),
     };
 
-    Ok(contents
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .map(str::to_string))
+    let reader = BufReader::new(file);
+    for line in reader.lines() {
+        let line = line?;
+        if !line.trim().is_empty() {
+            return Ok(Some(line));
+        }
+    }
+
+    Ok(None)
 }
 
 /// Validates the existing first non-empty JSONL line as a Heimdall header.
@@ -135,7 +142,16 @@ pub fn validate_existing_header(path: &Path) -> Result<Option<Value>, std::io::E
 #[cfg(feature = "metrics")]
 pub fn ensure_single_header(path: &Path, header: &Value) -> Result<(), std::io::Error> {
     match validate_existing_header(path)? {
-        Some(_) => Ok(()),
+        Some(existing) => {
+            if !headers_are_compatible(&existing, header) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "existing JSONL header does not match the requested schema metadata",
+                ));
+            }
+
+            Ok(())
+        }
         None => {
             if let Some(parent) = path.parent()
                 && !parent.as_os_str().is_empty()
@@ -163,6 +179,14 @@ pub fn append_jsonl_sample_row(
     serde_json::to_writer(&mut file, sample).map_err(std::io::Error::other)?;
     file.write_all(b"\n")?;
     Ok(())
+}
+
+#[cfg(feature = "metrics")]
+fn headers_are_compatible(existing: &Value, expected: &Value) -> bool {
+    let comparable_keys = ["schema", "artifact_type", "node_id", "producer", "flags"];
+    comparable_keys
+        .into_iter()
+        .all(|key| existing.get(key) == expected.get(key))
 }
 
 #[cfg(all(test, feature = "metrics"))]
@@ -244,6 +268,43 @@ mod tests {
         fs::write(&path, "{\"ts\":1.0,\"interval_secs\":1.0}\n").unwrap();
 
         let err = validate_existing_header(&path).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn mismatched_existing_header_is_rejected() {
+        let path = std::env::temp_dir().join(format!(
+            "mctx_mismatched_header_{}.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::ZERO)
+                .as_nanos()
+        ));
+        let header1 = json!({
+            "schema": HEIMDALL_JSONL_SCHEMA,
+            "artifact_type": NETWORK_ARTIFACT_TYPE,
+            "node_id": "sender-a",
+            "producer": "mctx-core/test",
+            "created_at": 1.0,
+            "flags": {"role": "sender"},
+        });
+        let header2 = json!({
+            "schema": HEIMDALL_JSONL_SCHEMA,
+            "artifact_type": NETWORK_ARTIFACT_TYPE,
+            "node_id": "sender-b",
+            "producer": "mctx-core/test",
+            "created_at": 2.0,
+            "flags": {"role": "sender"},
+        });
+
+        append_jsonl_sample_row(&path, &header1, &json!({"ts": 1.0, "interval_secs": 1.0}))
+            .unwrap();
+        let err =
+            append_jsonl_sample_row(&path, &header2, &json!({"ts": 2.0, "interval_secs": 1.0}))
+                .unwrap_err();
 
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
 

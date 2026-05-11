@@ -2,21 +2,21 @@
 use crate::metrics::ContextMetricsSnapshot;
 use crate::{MctxError, Publication, PublicationConfig, PublicationId, SendReport};
 use socket2::Socket;
-#[cfg(feature = "metrics")]
-use std::cell::Cell;
 use std::net::UdpSocket;
+#[cfg(feature = "metrics")]
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 #[cfg(feature = "metrics")]
 use std::time::SystemTime;
 
 #[cfg(feature = "metrics")]
 #[derive(Debug, Default)]
 struct ContextMetricsInner {
-    publications_added: Cell<u64>,
-    publications_removed: Cell<u64>,
-    total_send_calls: Cell<u64>,
-    total_packets_sent: Cell<u64>,
-    total_bytes_sent: Cell<u64>,
-    total_send_errors: Cell<u64>,
+    publications_added: AtomicU64,
+    publications_removed: AtomicU64,
+    total_send_calls: AtomicU64,
+    total_packets_sent: AtomicU64,
+    total_bytes_sent: AtomicU64,
+    total_send_errors: AtomicU64,
 }
 
 /// Small owner for a set of multicast publication sockets.
@@ -37,25 +37,17 @@ impl Default for Context {
 impl Context {
     #[cfg(feature = "metrics")]
     fn record_send_success(&self, bytes_sent: usize) {
-        self.metrics
-            .total_send_calls
-            .set(self.metrics.total_send_calls.get() + 1);
-        self.metrics
-            .total_packets_sent
-            .set(self.metrics.total_packets_sent.get() + 1);
+        self.metrics.total_send_calls.fetch_add(1, Relaxed);
+        self.metrics.total_packets_sent.fetch_add(1, Relaxed);
         self.metrics
             .total_bytes_sent
-            .set(self.metrics.total_bytes_sent.get() + bytes_sent as u64);
+            .fetch_add(bytes_sent as u64, Relaxed);
     }
 
     #[cfg(feature = "metrics")]
     fn record_send_error(&self) {
-        self.metrics
-            .total_send_calls
-            .set(self.metrics.total_send_calls.get() + 1);
-        self.metrics
-            .total_send_errors
-            .set(self.metrics.total_send_errors.get() + 1);
+        self.metrics.total_send_calls.fetch_add(1, Relaxed);
+        self.metrics.total_send_errors.fetch_add(1, Relaxed);
     }
 
     fn ensure_publication_config_is_unique(
@@ -78,9 +70,7 @@ impl Context {
         self.publications.push(publication);
 
         #[cfg(feature = "metrics")]
-        self.metrics
-            .publications_added
-            .set(self.metrics.publications_added.get() + 1);
+        self.metrics.publications_added.fetch_add(1, Relaxed);
 
         id
     }
@@ -89,9 +79,7 @@ impl Context {
         let publication = self.publications.swap_remove(index);
 
         #[cfg(feature = "metrics")]
-        self.metrics
-            .publications_removed
-            .set(self.metrics.publications_removed.get() + 1);
+        self.metrics.publications_removed.fetch_add(1, Relaxed);
 
         publication
     }
@@ -252,13 +240,13 @@ impl Context {
     #[cfg(feature = "metrics")]
     pub fn metrics_snapshot(&self) -> ContextMetricsSnapshot {
         ContextMetricsSnapshot {
-            publications_added: self.metrics.publications_added.get(),
-            publications_removed: self.metrics.publications_removed.get(),
+            publications_added: self.metrics.publications_added.load(Relaxed),
+            publications_removed: self.metrics.publications_removed.load(Relaxed),
             active_publications: self.publications.len(),
-            total_send_calls: self.metrics.total_send_calls.get(),
-            total_packets_sent: self.metrics.total_packets_sent.get(),
-            total_bytes_sent: self.metrics.total_bytes_sent.get(),
-            total_send_errors: self.metrics.total_send_errors.get(),
+            total_send_calls: self.metrics.total_send_calls.load(Relaxed),
+            total_packets_sent: self.metrics.total_packets_sent.load(Relaxed),
+            total_bytes_sent: self.metrics.total_bytes_sent.load(Relaxed),
+            total_send_errors: self.metrics.total_send_errors.load(Relaxed),
             captured_at: SystemTime::now(),
         }
     }
@@ -355,5 +343,13 @@ mod tests {
         assert_eq!(after_removal.total_bytes_sent, b"lifetime".len() as u64);
         assert_eq!(after_removal.active_publications, 0);
         assert_eq!(after_removal.publications_removed, 1);
+    }
+
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn context_is_sync_with_metrics_enabled() {
+        fn assert_sync<T: Sync>() {}
+
+        assert_sync::<Context>();
     }
 }
