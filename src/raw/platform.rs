@@ -12,7 +12,7 @@ use crate::raw::datagram::{ParsedRawIpDatagram, parse_raw_ip_datagram};
 use crate::raw::{RawPublicationConfig, RawPublicationId, RawSendReport};
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 use std::net::Ipv6Addr;
 #[cfg(target_os = "macos")]
 use std::net::SocketAddrV6;
@@ -458,9 +458,12 @@ fn packet_protocol(family: Option<PublicationAddressFamily>) -> u16 {
 }
 
 #[cfg(target_os = "linux")]
+const LINUX_ARPHRD_ETHER: i32 = 1;
+
+#[cfg(target_os = "linux")]
 fn ensure_linux_ethernet_interface(interface_index: u32) -> Result<(), MctxError> {
     let (interface_name, link_type) = linux_link_info(interface_index)?;
-    if link_type != libc::ARPHRD_ETHER {
+    if link_type != LINUX_ARPHRD_ETHER {
         return Err(MctxError::RawUnsupportedLinkType(format!(
             "{interface_name} (linux ARPHRD {link_type})"
         )));
