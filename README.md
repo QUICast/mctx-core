@@ -20,6 +20,7 @@ metrics add-ons.
 - Caller-provided socket support
 - Optional Tokio adapter via the `tokio` feature
 - Optional send metrics via the `metrics` feature
+- Optional full-datagram raw transmit via the `raw-packets` feature
 - Optional Python bindings via the sibling `mctx-core-py` crate
 
 ## Install
@@ -38,6 +39,12 @@ With optional metrics:
 
 ```bash
 cargo add mctx-core --features metrics
+```
+
+With optional raw packet transmit:
+
+```bash
+cargo add mctx-core --features raw-packets
 ```
 
 Python bindings are available in
@@ -205,6 +212,43 @@ Run the Tokio example with:
 
 ```bash
 cargo run --features tokio --bin mctx_tokio_send -- ff31::8000:1234 5000 hello-v6 --source ::1 --interface ::1
+```
+
+## Raw Packet Transmit
+
+If you need to inject complete multicast IP datagrams, enable
+`raw-packets` and use the parallel raw API:
+
+```rust
+use mctx_core::{RawContext, RawPublicationConfig};
+use std::net::Ipv4Addr;
+
+let mut ctx = RawContext::new();
+let id = ctx.add_publication(
+    RawPublicationConfig::ipv4().with_bind_addr(Ipv4Addr::new(192, 168, 1, 20)),
+)?;
+
+let report = ctx.send_raw(id, &ip_datagram)?;
+println!("sent {} raw bytes", report.bytes_sent);
+println!("observed source {:?}", report.source_ip);
+```
+
+This path is meant for AMT-style full-datagram forwarding where receivers must
+see the original source/group tuple. Current support is:
+
+- Linux: IPv4 and IPv6 via packet sockets
+- macOS: IPv4 and IPv6 via raw IP sockets
+- Windows: IPv4 via raw sockets
+
+All raw paths typically require elevated privileges such as `CAP_NET_RAW`,
+`root`, or Administrator rights.
+
+More detail lives in [Raw Packet Transmit](docs/raw-packets.md).
+
+For a quick raw UDP-in-IP harness:
+
+```bash
+cargo run --features raw-packets --bin mctx_raw_send -- 239.255.12.34 5000 hello-raw 5 100 --source 192.168.1.20 --source-port 4000
 ```
 
 ## Demo Binaries

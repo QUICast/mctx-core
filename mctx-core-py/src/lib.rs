@@ -2,7 +2,10 @@ use mctx_core::{
     Context, MctxError, OutgoingInterface, PublicationAddressFamily, PublicationConfig,
     PublicationId, SendReport,
 };
-use pyo3::exceptions::{PyBlockingIOError, PyLookupError, PyOSError, PyRuntimeError, PyValueError};
+use pyo3::exceptions::{
+    PyBlockingIOError, PyLookupError, PyNotImplementedError, PyOSError, PyRuntimeError,
+    PyValueError,
+};
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 use std::cell::RefCell;
@@ -136,25 +139,39 @@ fn mctx_error_to_py(err: MctxError) -> PyErr {
         | MctxError::InvalidSourceAddress
         | MctxError::InvalidInterfaceAddress
         | MctxError::InvalidIpv6InterfaceIndex
+        | MctxError::InvalidRawBindAddress
         | MctxError::SourceAddressFamilyMismatch
         | MctxError::OutgoingInterfaceFamilyMismatch
+        | MctxError::RawBindAddressFamilyMismatch
         | MctxError::Ipv6SourceInterfaceMismatch { .. }
         | MctxError::Ipv6ScopedMulticastRequiresInterface
         | MctxError::ExistingSocketAddressFamilyMismatch
         | MctxError::ExistingSocketPortMismatch { .. }
         | MctxError::ExistingSocketAddressMismatch { .. }
-        | MctxError::DuplicatePublication => PyValueError::new_err(err.to_string()),
+        | MctxError::DuplicatePublication
+        | MctxError::InvalidRawIpDatagram
+        | MctxError::InvalidRawMulticastDestination
+        | MctxError::RawInterfaceRequired
+        | MctxError::RawUnsupportedLinkType(_) => PyValueError::new_err(err.to_string()),
         MctxError::PublicationNotFound => PyLookupError::new_err(err.to_string()),
         MctxError::InterfaceDiscoveryFailed(_) => PyRuntimeError::new_err(err.to_string()),
-        MctxError::SendFailed(io_err) if io_err.kind() == std::io::ErrorKind::WouldBlock => {
+        MctxError::SendFailed(io_err) | MctxError::RawSendFailed(io_err)
+            if io_err.kind() == std::io::ErrorKind::WouldBlock =>
+        {
             PyBlockingIOError::new_err(io_err.to_string())
+        }
+        MctxError::RawPacketTransmitUnsupported(_) => {
+            PyNotImplementedError::new_err(err.to_string())
         }
         MctxError::SocketCreateFailed(io_err)
         | MctxError::SocketOptionFailed(io_err)
         | MctxError::SocketBindFailed(io_err)
         | MctxError::SocketConnectFailed(io_err)
         | MctxError::SocketLocalAddrFailed(io_err)
-        | MctxError::SendFailed(io_err) => PyOSError::new_err(io_err.to_string()),
+        | MctxError::SendFailed(io_err)
+        | MctxError::RawSocketCreateFailed(io_err)
+        | MctxError::RawSocketBindFailed(io_err)
+        | MctxError::RawSendFailed(io_err) => PyOSError::new_err(io_err.to_string()),
     }
 }
 

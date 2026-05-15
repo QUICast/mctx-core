@@ -116,6 +116,41 @@ link-local multicast destinations. Wider-scope groups such as `ff35`,
 If you already manage sockets externally, use
 `add_publication_with_socket(...)` or `add_publication_with_udp_socket(...)`.
 
+## Raw Packet Transmit
+
+If your caller already has a complete multicast IPv4 or IPv6 datagram and must
+preserve that header on the wire, enable the `raw-packets` feature and use the
+parallel raw API instead of the UDP payload API.
+
+```rust
+use mctx_core::{RawContext, RawPublicationConfig};
+use std::net::Ipv4Addr;
+
+let mut ctx = RawContext::new();
+let id = ctx.add_publication(
+    RawPublicationConfig::ipv4().with_bind_addr(Ipv4Addr::new(192, 168, 1, 20)),
+)?;
+
+let report = ctx.send_raw(id, &ip_datagram)?;
+println!("source {:?}", report.source_ip);
+```
+
+Important points:
+
+- `send_raw(...)` expects a complete IPv4 or IPv6 datagram, including the IP
+  header
+- the source IP receivers observe comes from the supplied datagram, not from a
+  UDP socket bind
+- Linux raw send currently requires an explicit Ethernet egress interface
+  selection and typically `CAP_NET_RAW` or root
+- macOS raw send supports IPv4 and IPv6 via raw IP sockets and typically
+  requires root
+- Windows raw send currently supports IPv4 only and typically requires
+  Administrator rights
+
+See [Raw Packet Transmit](raw-packets.md) for the platform matrix and detailed
+limits.
+
 ## Python Bindings
 
 If you want to drive the sender from Python, build the sibling `mctx-core-py`

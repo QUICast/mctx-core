@@ -7,6 +7,8 @@ pub mod jsonl;
 pub mod metrics;
 mod platform;
 pub mod publication;
+#[cfg(feature = "raw-packets")]
+pub mod raw;
 pub mod report;
 #[cfg(test)]
 mod test_support;
@@ -25,6 +27,11 @@ pub use metrics::{
     PublicationMetricsSampler, PublicationMetricsSnapshot,
 };
 pub use publication::{Publication, PublicationId, PublicationParts};
+#[cfg(feature = "raw-packets")]
+pub use raw::{
+    RawContext, RawPublication, RawPublicationConfig, RawPublicationId, RawSendReport,
+    RawValidationMode,
+};
 pub use report::SendReport;
 #[cfg(feature = "tokio")]
 pub use tokio_adapter::{TokioPublication, TokioSendError};

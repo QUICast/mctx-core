@@ -28,6 +28,10 @@ pub enum MctxError {
     #[error("MCTX: invalid IPv6 interface index")]
     InvalidIpv6InterfaceIndex,
 
+    /// The configured raw bind address is invalid.
+    #[error("MCTX: invalid raw bind address")]
+    InvalidRawBindAddress,
+
     /// The configured source address does not match the group address family.
     #[error("MCTX: source address family must match multicast group family")]
     SourceAddressFamilyMismatch,
@@ -35,6 +39,10 @@ pub enum MctxError {
     /// The configured outgoing interface does not match the group address family.
     #[error("MCTX: outgoing interface family must match multicast group family")]
     OutgoingInterfaceFamilyMismatch,
+
+    /// The configured raw bind address does not match the expected datagram family.
+    #[error("MCTX: raw bind address family must match the raw publication family")]
+    RawBindAddressFamilyMismatch,
 
     /// The configured IPv6 source address and outgoing interface disagree about
     /// which interface should be used.
@@ -100,11 +108,47 @@ pub enum MctxError {
     /// Sending a packet failed.
     #[error("MCTX: send failed: {0}")]
     SendFailed(io::Error),
+
+    /// Raw multicast packet transmit is not supported on the current platform or configuration.
+    #[error("MCTX: raw packet transmit is unsupported: {0}")]
+    RawPacketTransmitUnsupported(String),
+
+    /// Creating the raw transmit socket failed.
+    #[error("MCTX: failed to create raw transmit socket: {0}")]
+    RawSocketCreateFailed(io::Error),
+
+    /// Binding the raw transmit socket failed.
+    #[error("MCTX: failed to bind raw transmit socket: {0}")]
+    RawSocketBindFailed(io::Error),
+
+    /// Sending a raw IP datagram failed.
+    #[error("MCTX: raw send failed: {0}")]
+    RawSendFailed(io::Error),
+
+    /// The supplied raw datagram bytes are not a valid complete IPv4 or IPv6 datagram.
+    #[error("MCTX: invalid raw IP datagram")]
+    InvalidRawIpDatagram,
+
+    /// The supplied raw datagram does not target a multicast destination.
+    #[error("MCTX: raw datagram destination must be multicast")]
+    InvalidRawMulticastDestination,
+
+    /// Raw packet transmit needs an explicit outgoing interface selection.
+    #[error("MCTX: raw packet transmit requires an explicit outgoing interface or bind address")]
+    RawInterfaceRequired,
+
+    /// Raw packet transmit is not implemented for the selected link type.
+    #[error("MCTX: raw packet transmit does not support link type {0}")]
+    RawUnsupportedLinkType(String),
 }
 
 impl MctxError {
     #[cfg(feature = "tokio")]
     pub(crate) fn is_would_block(&self) -> bool {
-        matches!(self, Self::SendFailed(error) if error.kind() == io::ErrorKind::WouldBlock)
+        matches!(
+            self,
+            Self::SendFailed(error) | Self::RawSendFailed(error)
+                if error.kind() == io::ErrorKind::WouldBlock
+        )
     }
 }
