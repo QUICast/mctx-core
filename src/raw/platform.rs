@@ -10,13 +10,17 @@ use crate::raw::RawValidationMode;
 use crate::raw::datagram::apply_ttl_or_hop_limit_override;
 use crate::raw::datagram::{ParsedRawIpDatagram, parse_raw_ip_datagram};
 use crate::raw::{RawPublicationConfig, RawPublicationId, RawSendReport};
-#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+#[cfg(target_os = "linux")]
+use socket2::Socket;
+#[cfg(any(target_os = "macos", windows))]
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 use std::net::Ipv6Addr;
+#[cfg(any(target_os = "macos", windows))]
+use std::net::SocketAddrV4;
 #[cfg(target_os = "macos")]
 use std::net::SocketAddrV6;
-use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
+use std::net::{IpAddr, Ipv4Addr};
 #[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(windows)]
@@ -110,8 +114,12 @@ pub(crate) fn open_raw_transmit_socket(
     config.validate()?;
 
     match infer_socket_family(config)? {
-        PublicationAddressFamily::Ipv4 => open_macos_raw_socket_v4(config),
-        PublicationAddressFamily::Ipv6 => open_macos_raw_socket_v6(config),
+        PublicationAddressFamily::Ipv4 => {
+            open_macos_raw_socket_v4_with_protocol(config, libc::IPPROTO_RAW)
+        }
+        PublicationAddressFamily::Ipv6 => {
+            open_macos_raw_socket_v6_with_protocol(config, libc::IPPROTO_RAW)
+        }
     }
 }
 
@@ -122,7 +130,9 @@ pub(crate) fn open_raw_transmit_socket(
     config.validate()?;
 
     match infer_socket_family(config)? {
-        PublicationAddressFamily::Ipv4 => open_windows_raw_socket_v4(config),
+        PublicationAddressFamily::Ipv4 => {
+            open_windows_raw_socket_v4_with_protocol(config, IPPROTO_RAW as i32)
+        }
         PublicationAddressFamily::Ipv6 => Err(MctxError::RawPacketTransmitUnsupported(
             "Windows raw multicast transmit currently supports IPv4 only".to_string(),
         )),
@@ -225,23 +235,31 @@ pub(crate) fn send_raw_ip_datagram(
     }
 
     let datagram = prepare_macos_datagram_for_send(ip_datagram, parsed, config.ttl);
+    let send_socket = match parsed.family {
+        PublicationAddressFamily::Ipv4 => {
+            open_macos_raw_socket_v4_with_protocol(config, i32::from(parsed.protocol))?
+        }
+        PublicationAddressFamily::Ipv6 => {
+            open_macos_raw_socket_v6_with_protocol(config, i32::from(parsed.protocol))?
+        }
+    };
 
     let bytes_sent = match parsed.destination_ip {
-        IpAddr::V4(group) => socket
+        IpAddr::V4(group) => send_socket
             .socket
             .send_to(&datagram, &SockAddr::from(SocketAddrV4::new(group, 0)))
             .map_err(MctxError::RawSendFailed)?,
-        IpAddr::V6(group) => socket
+        IpAddr::V6(group) => send_socket
             .socket
             .send_to(
                 &datagram,
-                &SockAddr::from(destination_sockaddr_v6(group, socket.interface_index)),
+                &SockAddr::from(destination_sockaddr_v6(group, send_socket.interface_index)),
             )
             .map_err(MctxError::RawSendFailed)?,
     };
 
     Ok(raw_send_report(
-        socket,
+        &send_socket,
         publication_id,
         parsed,
         bytes_sent,
@@ -251,7 +269,7 @@ pub(crate) fn send_raw_ip_datagram(
 
 #[cfg(windows)]
 pub(crate) fn send_raw_ip_datagram(
-    socket: &RawTransmitSocket,
+    _socket: &RawTransmitSocket,
     publication_id: RawPublicationId,
     config: &RawPublicationConfig,
     ip_datagram: &[u8],
@@ -277,14 +295,15 @@ pub(crate) fn send_raw_ip_datagram(
         IpAddr::V4(group) => SocketAddrV4::new(group, 0),
         IpAddr::V6(_) => unreachable!("validated above"),
     };
+    let send_socket = open_windows_raw_socket_v4_with_protocol(config, i32::from(parsed.protocol))?;
 
-    let bytes_sent = socket
+    let bytes_sent = send_socket
         .socket
         .send_to(datagram, &SockAddr::from(destination))
         .map_err(MctxError::RawSendFailed)?;
 
     Ok(raw_send_report(
-        socket,
+        &send_socket,
         publication_id,
         parsed,
         bytes_sent,
@@ -517,14 +536,13 @@ fn resolve_interface_index_for_ip(ip: IpAddr) -> Result<u32, MctxError> {
 }
 
 #[cfg(target_os = "macos")]
-fn open_macos_raw_socket_v4(config: &RawPublicationConfig) -> Result<RawTransmitSocket, MctxError> {
+fn open_macos_raw_socket_v4_with_protocol(
+    config: &RawPublicationConfig,
+    protocol: i32,
+) -> Result<RawTransmitSocket, MctxError> {
     let selection = resolve_raw_ipv4_selection(config)?;
-    let socket = Socket::new(
-        Domain::IPV4,
-        Type::RAW,
-        Some(Protocol::from(libc::IPPROTO_RAW)),
-    )
-    .map_err(MctxError::RawSocketCreateFailed)?;
+    let socket = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::from(protocol)))
+        .map_err(MctxError::RawSocketCreateFailed)?;
 
     socket
         .set_nonblocking(true)
@@ -554,14 +572,13 @@ fn open_macos_raw_socket_v4(config: &RawPublicationConfig) -> Result<RawTransmit
 }
 
 #[cfg(target_os = "macos")]
-fn open_macos_raw_socket_v6(config: &RawPublicationConfig) -> Result<RawTransmitSocket, MctxError> {
+fn open_macos_raw_socket_v6_with_protocol(
+    config: &RawPublicationConfig,
+    protocol: i32,
+) -> Result<RawTransmitSocket, MctxError> {
     let selection = resolve_raw_ipv6_selection(config)?;
-    let socket = Socket::new(
-        Domain::IPV6,
-        Type::RAW,
-        Some(Protocol::from(libc::IPPROTO_RAW)),
-    )
-    .map_err(MctxError::RawSocketCreateFailed)?;
+    let socket = Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::from(protocol)))
+        .map_err(MctxError::RawSocketCreateFailed)?;
 
     socket
         .set_only_v6(true)
@@ -603,16 +620,13 @@ fn open_macos_raw_socket_v6(config: &RawPublicationConfig) -> Result<RawTransmit
 }
 
 #[cfg(windows)]
-fn open_windows_raw_socket_v4(
+fn open_windows_raw_socket_v4_with_protocol(
     config: &RawPublicationConfig,
+    protocol: i32,
 ) -> Result<RawTransmitSocket, MctxError> {
     let selection = resolve_raw_ipv4_selection(config)?;
-    let socket = Socket::new(
-        Domain::IPV4,
-        Type::RAW,
-        Some(Protocol::from(IPPROTO_RAW as i32)),
-    )
-    .map_err(MctxError::RawSocketCreateFailed)?;
+    let socket = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::from(protocol)))
+        .map_err(MctxError::RawSocketCreateFailed)?;
 
     socket
         .set_nonblocking(true)
