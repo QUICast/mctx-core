@@ -1,12 +1,9 @@
 # Usage Guide
 
-`mctx-core` keeps the send path small:
+This guide covers the default UDP send API. Optional raw packet, metrics,
+Python, and detailed IPv6 guidance live in their own docs.
 
-- build a `Context`
-- add one or more `PublicationConfig` values
-- send payloads through the returned `PublicationId`
-
-## Basic IPv4 Usage
+## Core Flow
 
 ```rust
 use mctx_core::{Context, PublicationConfig};
@@ -23,9 +20,7 @@ let report = ctx.send(id, b"hello multicast")?;
 println!("source {:?}", report.source_addr);
 ```
 
-## Basic IPv6 Usage
-
-Same-host IPv6 SSM-style testing:
+For IPv6:
 
 ```rust
 use mctx_core::{Context, PublicationConfig};
@@ -42,21 +37,8 @@ let report = ctx.send(id, b"hello multicast v6")?;
 println!("source {:?}", report.source_addr);
 ```
 
-Wider-scope IPv6 send:
-
-```rust
-use mctx_core::{Context, PublicationConfig};
-use std::net::Ipv6Addr;
-
-let mut ctx = Context::new();
-let id = ctx.add_publication(
-    PublicationConfig::new("ff3e::8000:1234".parse::<Ipv6Addr>()?, 5000)
-        .with_source_addr("fd00::10".parse::<Ipv6Addr>()?),
-)?;
-
-let report = ctx.send(id, b"hello multicast v6")?;
-println!("source {:?}", report.source_addr);
-```
+See [IPv6 Multicast](ipv6.md) for scope, source, and interface-selection
+rules.
 
 ## Useful Knobs
 
@@ -70,94 +52,108 @@ println!("source {:?}", report.source_addr);
 - `with_ttl(...)` controls IPv4 TTL or IPv6 multicast hop limit
 - `with_loopback(...)` toggles local host loopback delivery
 
-## Source Address vs Outgoing Interface
+## Sending
 
-These are different settings:
+Send on one publication:
 
-- source address: which local IP the sender binds before transmitting
-- outgoing interface: which interface multicast egress uses
+```rust
+let report = ctx.send(id, b"hello multicast")?;
+println!("sent {} bytes", report.bytes_sent);
+```
 
-For IPv6, `mctx-core` makes the relationship explicit:
+Send the same payload on every active publication:
 
-- if you provide an IPv6 source address, `mctx-core` binds that exact address
-  and resolves its interface index for `IPV6_MULTICAST_IF`
-- if you provide an IPv6 outgoing interface address without a source address,
-  `mctx-core` binds to that exact address automatically
-- if you provide only an IPv6 interface index, `mctx-core` uses it for
-  multicast egress but does not invent a source address for you
+```rust
+let mut reports = Vec::new();
+let count = ctx.send_all(b"hello multicast", &mut reports)?;
+println!("sent on {count} publications");
+```
 
-This matters for IPv6 SSM-style tests because the receiver's source filter uses
-the exact observed sender IP.
-
-## IPv6 Group Guidance
-
-- use `ff3x::/32` groups for IPv6 SSM-oriented testing
-- `ff31::/16` is interface-local and is the easiest choice for same-host tests
-- `ff32::/16` is link-local and should be paired with a `fe80::...` source
-- `ff35::/16` is site-local
-- `ff38::/16` is organization-local
-- `ff3e::/16` is global scope
-- do not treat `ff12::...` as an IPv6 SSM group
-
-`mctx-core` keeps the destination scope ID only for interface-local or
-link-local multicast destinations. Wider-scope groups such as `ff35`,
-`ff38`, and `ff3e` are connected with destination scope ID `0`.
-
-## Platform Notes
-
-- Windows: do not stuff the interface index into wider-scope IPv6 destination
-  addresses; use the bound source plus `IPV6_MULTICAST_IF`
-- macOS: link-local groups such as `ff32::/16` should send from `fe80::...`
-- Cross-platform: choosing only an interface index is not enough for IPv6
-  SSM-style verification when the receiver filters on the exact source IP
+`SendReport` includes the effective destination, the resolved local/source
+address when available, and the publication ID.
 
 ## Existing Sockets
 
 If you already manage sockets externally, use
 `add_publication_with_socket(...)` or `add_publication_with_udp_socket(...)`.
 
-## Raw Packet Transmit
-
-If your caller already has a complete multicast IPv4 or IPv6 datagram and must
-preserve that header on the wire, enable the `raw-packets` feature and use the
-parallel raw API instead of the UDP payload API.
-
 ```rust
-use mctx_core::{RawContext, RawPublicationConfig};
-use std::net::Ipv4Addr;
+use mctx_core::{Context, PublicationConfig};
+use socket2::{Domain, Protocol, Socket, Type};
+use std::net::Ipv6Addr;
 
-let mut ctx = RawContext::new();
-let id = ctx.add_publication(
-    RawPublicationConfig::ipv4().with_bind_addr(Ipv4Addr::new(192, 168, 1, 20)),
-)?;
+let mut ctx = Context::new();
+let config = PublicationConfig::new("ff31::8000:1234".parse::<Ipv6Addr>()?, 5000)
+    .with_source_addr(Ipv6Addr::LOCALHOST)
+    .with_outgoing_interface(Ipv6Addr::LOCALHOST);
 
-let report = ctx.send_raw(id, &ip_datagram)?;
-println!("source {:?}", report.source_ip);
+let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
+let id = ctx.add_publication_with_socket(config, socket)?;
+ctx.send(id, b"hello from an existing socket")?;
 ```
 
-Important points:
+The supplied socket is switched to non-blocking mode. `mctx-core` still
+applies its publication configuration, validates family/source compatibility,
+and keeps the socket connected to the multicast destination.
 
-- `send_raw(...)` expects a complete IPv4 or IPv6 datagram, including the IP
-  header
-- the source IP receivers observe comes from the supplied datagram, not from a
-  UDP socket bind
-- Linux raw send uses raw IP sockets and typically requires `CAP_NET_RAW` or
-  root
-- macOS raw send supports IPv4 and IPv6 via raw IP sockets and typically
-  requires root
-- on Linux and macOS IPv6, the kernel rebuilds the base IPv6 header during raw
-  transmit, but the configured source/group tuple, next-header, hop-limit, and
-  transport header are preserved for practical AMT/SSM-style UDP forwarding
-- Windows raw send currently supports IPv4 only and typically requires
-  Administrator rights
+## Event Loop Integration
 
-See [Raw Packet Transmit](raw-packets.md) for the platform matrix and detailed
-limits.
+Borrow a live socket while the publication stays inside the `Context`:
 
-## Python Bindings
+```rust
+let publication = ctx.get_publication(id).unwrap();
+let socket = publication.socket();
 
-If you want to drive the sender from Python, build the sibling `mctx-core-py`
-crate. It exposes `Context`, `Publication`, `SendReport`, and a small
-`AsyncPublication` helper.
+#[cfg(unix)]
+let raw = publication.as_raw_fd();
+```
 
-Build and packaging details live in [Python Bindings](python.md).
+Extract ownership for handoff into another runtime:
+
+```rust
+let publication = ctx.take_publication(id).unwrap();
+let parts = publication.into_parts();
+let socket = parts.socket;
+```
+
+If you need the announce tuple used by wire formats that carry source/group/UDP
+port explicitly:
+
+```rust
+let publication = ctx.get_publication(id).unwrap();
+let (source, group, udp_port) = publication.announce_tuple()?;
+```
+
+## Optional Extensions
+
+- Tokio: enable `tokio` and use `TokioPublication`; see [Demo Binaries](demo.md).
+- Metrics: enable `metrics`; see [Metrics](metrics.md).
+- Raw IP datagrams: enable `raw-packets`; see [Raw Packet Transmit](raw-packets.md).
+- Python bindings: see [Python Bindings](python.md).
+
+## Removing and Taking Ownership
+
+```rust
+ctx.remove_publication(id);
+```
+
+If you need the owned publication back:
+
+```rust
+if let Some(publication) = ctx.take_publication(id) {
+    let socket = publication.into_socket();
+    drop(socket);
+}
+```
+
+## Multiple Publications
+
+```rust
+let mut ctx = Context::new();
+
+let id1 = ctx.add_publication(PublicationConfig::new(group1, 5000))?;
+let id2 = ctx.add_publication(PublicationConfig::new(group2, 5001))?;
+
+ctx.send(id1, b"first payload")?;
+ctx.send(id2, b"second payload")?;
+```

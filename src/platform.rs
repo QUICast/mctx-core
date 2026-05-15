@@ -1,7 +1,9 @@
 use crate::MctxError;
-use std::net::{Ipv4Addr, Ipv6Addr};
+#[cfg(feature = "raw-packets")]
+use std::net::Ipv4Addr;
+use std::net::Ipv6Addr;
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "raw-packets"))]
 pub(crate) fn resolve_ipv4_interface_index(interface: Ipv4Addr) -> Result<u32, MctxError> {
     fn ambiguous_interface_error(interface: Ipv4Addr, first: u32, second: u32) -> MctxError {
         MctxError::InterfaceDiscoveryFailed(format!(
@@ -106,7 +108,7 @@ pub(crate) fn resolve_ipv6_interface_index(interface: Ipv6Addr) -> Result<u32, M
     }
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "raw-packets"))]
 pub(crate) fn resolve_ipv4_interface_index(interface: Ipv4Addr) -> Result<u32, MctxError> {
     use windows_sys::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, NO_ERROR};
     use windows_sys::Win32::NetworkManagement::IpHelper::{
@@ -281,7 +283,7 @@ pub(crate) fn resolve_ipv6_interface_index(interface: Ipv6Addr) -> Result<u32, M
     }
 }
 
-#[cfg(not(any(unix, windows)))]
+#[cfg(all(not(any(unix, windows)), feature = "raw-packets"))]
 pub(crate) fn resolve_ipv4_interface_index(interface: Ipv4Addr) -> Result<u32, MctxError> {
     Err(MctxError::InterfaceDiscoveryFailed(format!(
         "IPv4 interface resolution is not implemented on this platform for {interface}"
