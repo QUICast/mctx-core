@@ -10,13 +10,11 @@ use crate::raw::RawValidationMode;
 use crate::raw::datagram::apply_ttl_or_hop_limit_override;
 use crate::raw::datagram::{ParsedRawIpDatagram, parse_raw_ip_datagram};
 use crate::raw::{RawPublicationConfig, RawPublicationId, RawSendReport};
-#[cfg(target_os = "linux")]
-use socket2::Socket;
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 use std::net::Ipv6Addr;
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 use std::net::SocketAddrV4;
 #[cfg(target_os = "macos")]
 use std::net::SocketAddrV6;
@@ -32,16 +30,28 @@ pub(crate) struct RawTransmitSocket {
     family: PublicationAddressFamily,
     interface_index: Option<u32>,
     local_bind_addr: Option<IpAddr>,
+    #[cfg(target_os = "linux")]
+    linux_backend: LinuxRawTransmitBackend,
 }
 
 impl std::fmt::Debug for RawTransmitSocket {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RawTransmitSocket")
+        let mut debug = f.debug_struct("RawTransmitSocket");
+        debug
             .field("family", &self.family)
             .field("interface_index", &self.interface_index)
-            .field("local_bind_addr", &self.local_bind_addr)
-            .finish_non_exhaustive()
+            .field("local_bind_addr", &self.local_bind_addr);
+        #[cfg(target_os = "linux")]
+        debug.field("linux_backend", &self.linux_backend);
+        debug.finish_non_exhaustive()
     }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinuxRawTransmitBackend {
+    Packet,
+    RawIpv4,
 }
 
 #[cfg(target_os = "linux")]
@@ -50,9 +60,17 @@ pub(crate) fn open_raw_transmit_socket(
 ) -> Result<RawTransmitSocket, MctxError> {
     config.validate()?;
 
+    match configured_socket_family(config) {
+        Some(PublicationAddressFamily::Ipv4) => open_linux_raw_socket_v4(config),
+        Some(PublicationAddressFamily::Ipv6) | None => open_linux_packet_socket(config),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn open_linux_packet_socket(config: &RawPublicationConfig) -> Result<RawTransmitSocket, MctxError> {
     if config.loopback.is_some() {
         return Err(MctxError::RawPacketTransmitUnsupported(
-            "Linux raw packet transmit does not currently support explicit multicast loopback control".to_string(),
+            "Linux IPv6 packet-socket transmit does not currently support explicit multicast loopback control".to_string(),
         ));
     }
 
@@ -101,9 +119,10 @@ pub(crate) fn open_raw_transmit_socket(
 
     Ok(RawTransmitSocket {
         socket,
-        family: config.family.unwrap_or(PublicationAddressFamily::Ipv4),
+        family: configured_socket_family(config).unwrap_or(PublicationAddressFamily::Ipv4),
         interface_index: Some(interface_index),
         local_bind_addr: config.bind_addr,
+        linux_backend: LinuxRawTransmitBackend::Packet,
     })
 }
 
@@ -158,22 +177,6 @@ pub(crate) fn send_raw_ip_datagram(
     let parsed = parse_raw_ip_datagram(ip_datagram)?;
     validate_datagram_against_config(parsed, config)?;
 
-    let destination_mac = match parsed.destination_ip {
-        IpAddr::V4(group) if group.is_multicast() => ipv4_multicast_mac(group),
-        IpAddr::V6(group) if group.is_multicast() => ipv6_multicast_mac(group),
-        _ => match config.validation_mode {
-            RawValidationMode::StrictMulticastDestination => {
-                return Err(MctxError::InvalidRawMulticastDestination);
-            }
-            RawValidationMode::AllowAnyDestination => {
-                return Err(MctxError::RawPacketTransmitUnsupported(
-                    "Linux raw packet transmit currently supports multicast destinations only"
-                        .to_string(),
-                ));
-            }
-        },
-    };
-
     let datagram_storage;
     let datagram = if let Some(ttl) = config.ttl {
         datagram_storage = apply_ttl_or_hop_limit_override(ip_datagram, parsed, ttl);
@@ -182,42 +185,14 @@ pub(crate) fn send_raw_ip_datagram(
         ip_datagram
     };
 
-    let protocol = packet_protocol(Some(parsed.family));
-    let mut send_addr = libc::sockaddr_ll {
-        sll_family: libc::AF_PACKET as u16,
-        sll_protocol: protocol,
-        sll_ifindex: socket
-            .interface_index
-            .expect("linux raw interface index is known") as i32,
-        sll_hatype: libc::ARPHRD_ETHER,
-        sll_pkttype: 0,
-        sll_halen: destination_mac.len() as u8,
-        sll_addr: [0; 8],
-    };
-    send_addr.sll_addr[..destination_mac.len()].copy_from_slice(&destination_mac);
-
-    let result = unsafe {
-        libc::sendto(
-            socket.socket.as_raw_fd(),
-            datagram.as_ptr().cast(),
-            datagram.len(),
-            0,
-            (&send_addr as *const libc::sockaddr_ll).cast(),
-            std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t,
-        )
-    };
-
-    if result == -1 {
-        return Err(MctxError::RawSendFailed(std::io::Error::last_os_error()));
+    match socket.linux_backend {
+        LinuxRawTransmitBackend::Packet => {
+            send_linux_packet_datagram(socket, publication_id, config, parsed, datagram)
+        }
+        LinuxRawTransmitBackend::RawIpv4 => {
+            send_linux_raw_ipv4_datagram(socket, publication_id, config, parsed, datagram)
+        }
     }
-
-    Ok(raw_send_report(
-        socket,
-        publication_id,
-        parsed,
-        result as usize,
-        config.outgoing_interface,
-    ))
 }
 
 #[cfg(target_os = "macos")]
@@ -260,6 +235,110 @@ pub(crate) fn send_raw_ip_datagram(
 
     Ok(raw_send_report(
         &send_socket,
+        publication_id,
+        parsed,
+        bytes_sent,
+        config.outgoing_interface,
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn send_linux_packet_datagram(
+    socket: &RawTransmitSocket,
+    publication_id: RawPublicationId,
+    config: &RawPublicationConfig,
+    parsed: ParsedRawIpDatagram,
+    datagram: &[u8],
+) -> Result<RawSendReport, MctxError> {
+    let destination_mac = match parsed.destination_ip {
+        IpAddr::V4(group) if group.is_multicast() => ipv4_multicast_mac(group),
+        IpAddr::V6(group) if group.is_multicast() => ipv6_multicast_mac(group),
+        _ => match config.validation_mode {
+            RawValidationMode::StrictMulticastDestination => {
+                return Err(MctxError::InvalidRawMulticastDestination);
+            }
+            RawValidationMode::AllowAnyDestination => {
+                return Err(MctxError::RawPacketTransmitUnsupported(
+                    "Linux raw packet transmit currently supports multicast destinations only"
+                        .to_string(),
+                ));
+            }
+        },
+    };
+
+    let protocol = packet_protocol(Some(parsed.family));
+    let mut send_addr = libc::sockaddr_ll {
+        sll_family: libc::AF_PACKET as u16,
+        sll_protocol: protocol,
+        sll_ifindex: socket
+            .interface_index
+            .expect("linux raw interface index is known") as i32,
+        sll_hatype: libc::ARPHRD_ETHER,
+        sll_pkttype: 0,
+        sll_halen: destination_mac.len() as u8,
+        sll_addr: [0; 8],
+    };
+    send_addr.sll_addr[..destination_mac.len()].copy_from_slice(&destination_mac);
+
+    let result = unsafe {
+        libc::sendto(
+            socket.socket.as_raw_fd(),
+            datagram.as_ptr().cast(),
+            datagram.len(),
+            0,
+            (&send_addr as *const libc::sockaddr_ll).cast(),
+            std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t,
+        )
+    };
+
+    if result == -1 {
+        return Err(MctxError::RawSendFailed(std::io::Error::last_os_error()));
+    }
+
+    Ok(raw_send_report(
+        socket,
+        publication_id,
+        parsed,
+        result as usize,
+        config.outgoing_interface,
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn send_linux_raw_ipv4_datagram(
+    socket: &RawTransmitSocket,
+    publication_id: RawPublicationId,
+    config: &RawPublicationConfig,
+    parsed: ParsedRawIpDatagram,
+    datagram: &[u8],
+) -> Result<RawSendReport, MctxError> {
+    let destination = match parsed.destination_ip {
+        IpAddr::V4(group) if group.is_multicast() => SocketAddrV4::new(group, 0),
+        IpAddr::V4(_) => match config.validation_mode {
+            RawValidationMode::StrictMulticastDestination => {
+                return Err(MctxError::InvalidRawMulticastDestination);
+            }
+            RawValidationMode::AllowAnyDestination => {
+                return Err(MctxError::RawPacketTransmitUnsupported(
+                    "Linux raw IPv4 transmit currently supports multicast destinations only"
+                        .to_string(),
+                ));
+            }
+        },
+        IpAddr::V6(_) => {
+            return Err(MctxError::RawPacketTransmitUnsupported(
+                "Linux raw IPv4 transmit cannot send IPv6 datagrams".to_string(),
+            ));
+        }
+    };
+
+    let bytes_sent = socket
+        .socket
+        .send_to(datagram, &SockAddr::from(destination))
+        .map_err(MctxError::RawSendFailed)?;
+
+    Ok(raw_send_report(
+        socket,
         publication_id,
         parsed,
         bytes_sent,
@@ -378,18 +457,22 @@ fn raw_send_report(
     }
 }
 
-#[cfg(any(target_os = "macos", windows))]
-fn infer_socket_family(
-    config: &RawPublicationConfig,
-) -> Result<PublicationAddressFamily, MctxError> {
+#[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
+fn configured_socket_family(config: &RawPublicationConfig) -> Option<PublicationAddressFamily> {
     config
         .family
         .or_else(|| config.bind_addr.map(ip_family))
         .or_else(|| outgoing_interface_family(config.outgoing_interface))
-        .ok_or(MctxError::RawInterfaceRequired)
 }
 
-#[cfg(any(target_os = "macos", windows, test))]
+#[cfg(any(target_os = "macos", windows))]
+fn infer_socket_family(
+    config: &RawPublicationConfig,
+) -> Result<PublicationAddressFamily, MctxError> {
+    configured_socket_family(config).ok_or(MctxError::RawInterfaceRequired)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
 fn ip_family(ip: IpAddr) -> PublicationAddressFamily {
     match ip {
         IpAddr::V4(_) => PublicationAddressFamily::Ipv4,
@@ -397,7 +480,7 @@ fn ip_family(ip: IpAddr) -> PublicationAddressFamily {
     }
 }
 
-#[cfg(any(target_os = "macos", windows, test))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
 fn outgoing_interface_family(
     outgoing_interface: Option<OutgoingInterface>,
 ) -> Option<PublicationAddressFamily> {
@@ -535,6 +618,44 @@ fn resolve_interface_index_for_ip(ip: IpAddr) -> Result<u32, MctxError> {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn open_linux_raw_socket_v4(config: &RawPublicationConfig) -> Result<RawTransmitSocket, MctxError> {
+    let selection = resolve_raw_ipv4_selection(config)?;
+    let socket = Socket::new(
+        Domain::IPV4,
+        Type::RAW,
+        Some(Protocol::from(libc::IPPROTO_RAW)),
+    )
+    .map_err(MctxError::RawSocketCreateFailed)?;
+
+    socket
+        .set_nonblocking(true)
+        .map_err(MctxError::SocketOptionFailed)?;
+    socket
+        .set_header_included_v4(true)
+        .map_err(MctxError::SocketOptionFailed)?;
+    socket
+        .bind(&SockAddr::from(SocketAddrV4::new(selection.bind_addr, 0)))
+        .map_err(MctxError::RawSocketBindFailed)?;
+    socket
+        .set_multicast_if_v4(&selection.interface_addr)
+        .map_err(MctxError::SocketOptionFailed)?;
+
+    if let Some(loopback) = config.loopback {
+        socket
+            .set_multicast_loop_v4(loopback)
+            .map_err(MctxError::SocketOptionFailed)?;
+    }
+
+    Ok(RawTransmitSocket {
+        socket,
+        family: PublicationAddressFamily::Ipv4,
+        interface_index: Some(selection.interface_index),
+        local_bind_addr: Some(IpAddr::V4(selection.bind_addr)),
+        linux_backend: LinuxRawTransmitBackend::RawIpv4,
+    })
+}
+
 #[cfg(target_os = "macos")]
 fn open_macos_raw_socket_v4_with_protocol(
     config: &RawPublicationConfig,
@@ -655,7 +776,7 @@ fn open_windows_raw_socket_v4_with_protocol(
     })
 }
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 #[derive(Debug, Clone, Copy)]
 struct RawIpv4Selection {
     bind_addr: Ipv4Addr,
@@ -671,7 +792,7 @@ struct RawIpv6Selection {
     interface_index: u32,
 }
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn resolve_raw_ipv4_selection(
     config: &RawPublicationConfig,
 ) -> Result<RawIpv4Selection, MctxError> {

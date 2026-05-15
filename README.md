@@ -243,6 +243,11 @@ see the original source/group tuple. Current support is:
 All raw paths typically require elevated privileges such as `CAP_NET_RAW`,
 `root`, or Administrator rights.
 
+In current observed IPv4 ASM interop testing, macOS and Windows senders are
+seen by all three platforms, and Linux senders are seen by macOS and Windows
+peers. The one observed gap so far is Linux same-host receive for packets sent
+from the same Linux machine.
+
 More detail lives in [Raw Packet Transmit](docs/raw-packets.md).
 
 For a quick raw UDP-in-IP harness:

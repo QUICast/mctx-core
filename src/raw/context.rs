@@ -104,7 +104,9 @@ impl RawContext {
 mod tests {
     use super::*;
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
-    use crate::test_support::{TEST_GROUP, recv_payload, test_multicast_receiver};
+    use crate::test_support::TEST_GROUP;
+    #[cfg(target_os = "macos")]
+    use crate::test_support::{recv_payload, test_multicast_receiver};
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -143,9 +145,9 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    #[ignore = "requires CAP_NET_RAW and MCTX_RAW_TEST_SOURCE_V4 set to a local Ethernet IPv4 address"]
-    fn linux_raw_ipv4_send_smoke_test() {
-        run_raw_ipv4_send_smoke_test();
+    #[ignore = "requires CAP_NET_RAW and MCTX_RAW_TEST_SOURCE_V4 set to a local Ethernet IPv4 address; validates send success/report only"]
+    fn linux_raw_ipv4_send_report_smoke_test() {
+        run_raw_ipv4_send_report_smoke_test();
     }
 
     #[cfg(target_os = "macos")]
@@ -157,12 +159,12 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    #[ignore = "requires Administrator privileges and MCTX_RAW_TEST_SOURCE_V4 set to a local IPv4 address"]
-    fn windows_raw_ipv4_send_smoke_test() {
-        run_raw_ipv4_send_smoke_test();
+    #[ignore = "requires Administrator privileges and MCTX_RAW_TEST_SOURCE_V4 set to a local IPv4 address; validates send success/report only"]
+    fn windows_raw_ipv4_send_report_smoke_test() {
+        run_raw_ipv4_send_report_smoke_test();
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[cfg(target_os = "macos")]
     fn run_raw_ipv4_send_smoke_test() {
         let Some(source) = std::env::var("MCTX_RAW_TEST_SOURCE_V4")
             .ok()
@@ -184,6 +186,34 @@ mod tests {
         assert_eq!(report.source_ip, Some(IpAddr::V4(source)));
         assert_eq!(report.destination_ip, Some(IpAddr::V4(TEST_GROUP)));
         assert_eq!(recv_payload(&receiver), payload);
+    }
+
+    #[cfg(any(target_os = "linux", windows))]
+    fn run_raw_ipv4_send_report_smoke_test() {
+        let Some(source) = std::env::var("MCTX_RAW_TEST_SOURCE_V4")
+            .ok()
+            .and_then(|raw| raw.parse::<Ipv4Addr>().ok())
+        else {
+            return;
+        };
+
+        let mut ctx = RawContext::new();
+        let id = ctx
+            .add_publication(
+                RawPublicationConfig::ipv4()
+                    .with_bind_addr(source)
+                    .with_outgoing_interface(source),
+            )
+            .unwrap();
+
+        let payload = b"raw-smoke";
+        let datagram = build_ipv4_udp_datagram(source, TEST_GROUP, 4000, 5000, payload);
+        let report = ctx.send_raw(id, &datagram).unwrap();
+
+        assert_eq!(report.source_ip, Some(IpAddr::V4(source)));
+        assert_eq!(report.destination_ip, Some(IpAddr::V4(TEST_GROUP)));
+        assert_eq!(report.ip_protocol, Some(17));
+        assert_eq!(report.bytes_sent, datagram.len());
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]

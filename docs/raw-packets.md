@@ -88,9 +88,14 @@ The repo includes a small convenience sender binary:
 cargo run --features raw-packets --bin mctx_raw_send -- <group> <dst_port> <payload> [count] [interval_ms] --source <ip> [--source-port <port>] [--interface <ip>] [--interface-index <idx>] [--ttl <ttl>] [--no-loopback]
 ```
 
-It builds a complete UDP-in-IP datagram and sends it through the raw API, which
-makes it useful for validation with ordinary multicast UDP receivers such as
-`mcrx_recv_meta`.
+It builds a complete UDP-in-IP datagram and sends it through the raw API.
+
+On macOS, that often makes it useful for validation with ordinary multicast UDP
+receivers such as `mcrx_recv_meta`. On Linux and Windows, same-host UDP receive
+is not a reliable raw-send validation method, because the current raw backends
+do not guarantee that injected multicast datagrams are reflected back through
+the local host's normal multicast receive path. For those platforms, prefer a
+second machine or packet capture when validating raw transmit.
 
 Example:
 
@@ -104,7 +109,9 @@ override egress with `--interface` or `--interface-index`.
 
 ## Receiver Pairings
 
-IPv4 ASM smoke test with `mcrx-core`:
+IPv4 ASM test with `mcrx-core`:
+
+macOS same-host:
 
 ```bash
 # receiver
@@ -114,7 +121,19 @@ cargo run --bin mcrx_recv_meta -- 239.255.12.34 5000
 cargo run --features raw-packets --bin mctx_raw_send -- 239.255.12.34 5000 hello-raw 5 100 --source 192.168.1.20 --source-port 4000
 ```
 
-IPv4 SSM smoke test with `mcrx-core`:
+Linux or Windows cross-host:
+
+```bash
+# receiver on another machine
+cargo run --bin mcrx_recv_meta -- 239.255.12.34 5000
+
+# sender
+cargo run --features raw-packets --bin mctx_raw_send -- 239.255.12.34 5000 hello-raw 5 100 --source 192.168.1.20 --source-port 4000 --interface 192.168.1.20 --ttl 16
+```
+
+IPv4 SSM test with `mcrx-core`:
+
+macOS same-host or cross-host:
 
 ```bash
 # receiver
@@ -123,6 +142,9 @@ cargo run --bin mcrx_recv_meta -- 232.1.2.3 5000 --source 192.168.1.20
 # sender
 cargo run --features raw-packets --bin mctx_raw_send -- 232.1.2.3 5000 hello-ssm 5 100 --source 192.168.1.20 --source-port 4000
 ```
+
+Linux or Windows should prefer a second machine or packet capture for raw-send
+validation.
 
 IPv6 same-host SSM-style smoke test on Linux or macOS:
 
@@ -166,6 +188,21 @@ Current first-pass support:
 - Windows: implemented for IPv4 with raw sockets
 - other platforms: explicit unsupported error
 
+### Observed IPv4 ASM Behavior
+
+For the current `raw-packets` backend, the following IPv4 ASM behavior has been
+observed with `mctx_raw_send` as sender and `mcrx-core` receivers:
+
+| Sender  | macOS receiver | Windows receiver | Linux receiver |
+|---------|----------------|------------------|----------------|
+| macOS   | Seen           | Seen             | Seen           |
+| Windows | Seen           | Seen             | Seen           |
+| Linux   | Seen           | Seen             | Not seen       |
+
+This matrix is specifically about IPv4 ASM testing so far. The only observed
+gap is Linux same-host receive for packets sent from the same Linux machine.
+Cross-host delivery from Linux has been observed to work.
+
 ### Linux
 
 The current implementation uses Linux packet sockets and requires an explicit
@@ -183,6 +220,14 @@ Practical notes:
 - TTL or hop-limit overrides are patched directly into the supplied IP header
 - explicit raw multicast loopback control is not currently implemented on the
   Linux packet-socket backend
+- packets emitted through the Linux packet-socket backend may be visible on the
+  wire but not reflected back into same-host multicast UDP or raw receive
+  sockets in a portable way
+- in current observed IPv4 ASM testing, Linux-to-Linux same-host receive is the
+  one combination that has not been observed to work, even though Linux-to-other
+  hosts is visible on the wire and received by macOS and Windows peers
+- for Linux raw-send validation, prefer a second host on the LAN or packet
+  capture on the sender and receiver interfaces
 
 `bind_addr` on Linux packet sockets does not rewrite the datagram source IP.
 The source IP seen by receivers is the source IP already present in the caller's
@@ -214,18 +259,19 @@ Practical notes:
 - the implementation uses IPv4 raw sockets with `IP_HDRINCL`
 - `bind_addr` is used as the exact local IPv4 bind when provided
 - `IP_MULTICAST_IF` is still set explicitly for multicast egress
+- same-host multicast receive is not a reliable validation method for this raw
+  backend; prefer a second host or packet capture
 - IPv6 full-header transmit is not currently implemented and returns
   `MctxError::RawPacketTransmitUnsupported(...)`
 
 ## Ignored Privileged Smoke Tests
 
-The raw module also contains ignored IPv4 smoke tests that use a normal UDP
-multicast receiver and the raw sender path:
+The raw module also contains ignored privileged smoke tests:
 
 Linux:
 
 ```bash
-MCTX_RAW_TEST_SOURCE_V4=192.168.1.20 cargo test --features raw-packets raw::context::tests::linux_raw_ipv4_send_smoke_test -- --ignored --exact --nocapture
+MCTX_RAW_TEST_SOURCE_V4=192.168.1.20 cargo test --features raw-packets raw::context::tests::linux_raw_ipv4_send_report_smoke_test -- --ignored --exact --nocapture
 ```
 
 macOS:
@@ -238,7 +284,7 @@ Windows PowerShell:
 
 ```powershell
 $env:MCTX_RAW_TEST_SOURCE_V4="192.168.1.20"
-cargo test --features raw-packets raw::context::tests::windows_raw_ipv4_send_smoke_test -- --ignored --exact --nocapture
+cargo test --features raw-packets raw::context::tests::windows_raw_ipv4_send_report_smoke_test -- --ignored --exact --nocapture
 ```
 
 ## Validation Rules
