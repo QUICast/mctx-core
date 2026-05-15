@@ -151,6 +151,7 @@ fn mctx_error_to_py(err: MctxError) -> PyErr {
         | MctxError::DuplicatePublication
         | MctxError::InvalidRawIpDatagram
         | MctxError::InvalidRawMulticastDestination
+        | MctxError::RawDatagramSourceMismatch { .. }
         | MctxError::RawInterfaceRequired
         | MctxError::RawUnsupportedLinkType(_) => PyValueError::new_err(err.to_string()),
         MctxError::PublicationNotFound => PyLookupError::new_err(err.to_string()),

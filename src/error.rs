@@ -133,6 +133,15 @@ pub enum MctxError {
     #[error("MCTX: raw datagram destination must be multicast")]
     InvalidRawMulticastDestination,
 
+    /// The supplied raw datagram source conflicts with the configured bind address.
+    #[error(
+        "MCTX: raw datagram source address {datagram_source} does not match configured bind address {configured_bind_addr}"
+    )]
+    RawDatagramSourceMismatch {
+        datagram_source: IpAddr,
+        configured_bind_addr: IpAddr,
+    },
+
     /// Raw packet transmit needs an explicit outgoing interface selection.
     #[error("MCTX: raw packet transmit requires an explicit outgoing interface or bind address")]
     RawInterfaceRequired,

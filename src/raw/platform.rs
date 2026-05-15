@@ -84,9 +84,7 @@ pub(crate) fn open_raw_transmit_socket(
     config.validate()?;
 
     match infer_socket_family(config)? {
-        PublicationAddressFamily::Ipv4 => {
-            open_macos_raw_socket_v4_with_protocol(config, libc::IPPROTO_RAW)
-        }
+        PublicationAddressFamily::Ipv4 => open_macos_raw_socket_v4(config),
         PublicationAddressFamily::Ipv6 => open_macos_raw_socket_v6(config),
     }
 }
@@ -98,9 +96,7 @@ pub(crate) fn open_raw_transmit_socket(
     config.validate()?;
 
     match infer_socket_family(config)? {
-        PublicationAddressFamily::Ipv4 => {
-            open_windows_raw_socket_v4_with_protocol(config, IPPROTO_RAW as i32)
-        }
+        PublicationAddressFamily::Ipv4 => open_windows_raw_socket_v4(config),
         PublicationAddressFamily::Ipv6 => Err(MctxError::RawPacketTransmitUnsupported(
             "Windows raw multicast transmit currently supports IPv4 only".to_string(),
         )),
@@ -469,7 +465,7 @@ fn open_linux_raw_socket_v4(config: &RawPublicationConfig) -> Result<RawTransmit
 
 #[cfg(target_os = "linux")]
 fn open_linux_raw_socket_v6(config: &RawPublicationConfig) -> Result<RawTransmitSocket, MctxError> {
-    let selection = resolve_raw_ipv6_selection(config)?;
+    let selection = resolve_raw_ipv6_selection(config, None)?;
     Ok(RawTransmitSocket {
         family: PublicationAddressFamily::Ipv6,
         socket: None,
@@ -480,32 +476,28 @@ fn open_linux_raw_socket_v6(config: &RawPublicationConfig) -> Result<RawTransmit
 }
 
 #[cfg(target_os = "macos")]
+fn open_macos_raw_socket_v4(config: &RawPublicationConfig) -> Result<RawTransmitSocket, MctxError> {
+    let selection = resolve_raw_ipv4_selection(config)?;
+    let probe_socket =
+        open_raw_ipv4_socket_with_protocol(selection, config.loopback, libc::IPPROTO_RAW)?;
+    drop(probe_socket);
+
+    Ok(RawTransmitSocket {
+        socket: None,
+        family: PublicationAddressFamily::Ipv4,
+        interface_index: Some(selection.interface_index),
+        local_bind_addr: Some(IpAddr::V4(selection.bind_addr)),
+        macos_backend: MacosRawTransmitBackend::RawIpv4,
+    })
+}
+
+#[cfg(target_os = "macos")]
 fn open_macos_raw_socket_v4_with_protocol(
     config: &RawPublicationConfig,
     protocol: i32,
 ) -> Result<RawTransmitSocket, MctxError> {
     let selection = resolve_raw_ipv4_selection(config)?;
-    let socket = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::from(protocol)))
-        .map_err(MctxError::RawSocketCreateFailed)?;
-
-    socket
-        .set_nonblocking(true)
-        .map_err(MctxError::SocketOptionFailed)?;
-    socket
-        .set_header_included_v4(true)
-        .map_err(MctxError::SocketOptionFailed)?;
-    socket
-        .bind(&SockAddr::from(SocketAddrV4::new(selection.bind_addr, 0)))
-        .map_err(MctxError::RawSocketBindFailed)?;
-    socket
-        .set_multicast_if_v4(&selection.interface_addr)
-        .map_err(MctxError::SocketOptionFailed)?;
-
-    if let Some(loopback) = config.loopback {
-        socket
-            .set_multicast_loop_v4(loopback)
-            .map_err(MctxError::SocketOptionFailed)?;
-    }
+    let socket = open_raw_ipv4_socket_with_protocol(selection, config.loopback, protocol)?;
 
     Ok(RawTransmitSocket {
         socket: Some(socket),
@@ -518,7 +510,7 @@ fn open_macos_raw_socket_v4_with_protocol(
 
 #[cfg(target_os = "macos")]
 fn open_macos_raw_socket_v6(config: &RawPublicationConfig) -> Result<RawTransmitSocket, MctxError> {
-    let selection = resolve_raw_ipv6_selection(config)?;
+    let selection = resolve_raw_ipv6_selection(config, None)?;
     Ok(RawTransmitSocket {
         socket: None,
         family: PublicationAddressFamily::Ipv6,
@@ -529,11 +521,44 @@ fn open_macos_raw_socket_v6(config: &RawPublicationConfig) -> Result<RawTransmit
 }
 
 #[cfg(windows)]
+fn open_windows_raw_socket_v4(
+    config: &RawPublicationConfig,
+) -> Result<RawTransmitSocket, MctxError> {
+    let selection = resolve_raw_ipv4_selection(config)?;
+    let probe_socket =
+        open_raw_ipv4_socket_with_protocol(selection, config.loopback, IPPROTO_RAW as i32)?;
+    drop(probe_socket);
+
+    Ok(RawTransmitSocket {
+        socket: None,
+        family: PublicationAddressFamily::Ipv4,
+        interface_index: Some(selection.interface_index),
+        local_bind_addr: Some(IpAddr::V4(selection.bind_addr)),
+    })
+}
+
+#[cfg(windows)]
 fn open_windows_raw_socket_v4_with_protocol(
     config: &RawPublicationConfig,
     protocol: i32,
 ) -> Result<RawTransmitSocket, MctxError> {
     let selection = resolve_raw_ipv4_selection(config)?;
+    let socket = open_raw_ipv4_socket_with_protocol(selection, config.loopback, protocol)?;
+
+    Ok(RawTransmitSocket {
+        socket: Some(socket),
+        family: PublicationAddressFamily::Ipv4,
+        interface_index: Some(selection.interface_index),
+        local_bind_addr: Some(IpAddr::V4(selection.bind_addr)),
+    })
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn open_raw_ipv4_socket_with_protocol(
+    selection: RawIpv4Selection,
+    loopback: Option<bool>,
+    protocol: i32,
+) -> Result<Socket, MctxError> {
     let socket = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::from(protocol)))
         .map_err(MctxError::RawSocketCreateFailed)?;
 
@@ -550,18 +575,13 @@ fn open_windows_raw_socket_v4_with_protocol(
         .set_multicast_if_v4(&selection.interface_addr)
         .map_err(MctxError::SocketOptionFailed)?;
 
-    if let Some(loopback) = config.loopback {
+    if let Some(loopback) = loopback {
         socket
             .set_multicast_loop_v4(loopback)
             .map_err(MctxError::SocketOptionFailed)?;
     }
 
-    Ok(RawTransmitSocket {
-        socket: Some(socket),
-        family: PublicationAddressFamily::Ipv4,
-        interface_index: Some(selection.interface_index),
-        local_bind_addr: Some(IpAddr::V4(selection.bind_addr)),
-    })
+    Ok(socket)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
@@ -615,13 +635,24 @@ fn resolve_raw_ipv4_selection(
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn resolve_raw_ipv6_selection(
     config: &RawPublicationConfig,
+    datagram_source: Option<Ipv6Addr>,
 ) -> Result<RawIpv6Selection, MctxError> {
-    let bind_addr = config
-        .bind_addr
-        .and_then(|ip| match ip {
-            IpAddr::V6(addr) => Some(addr),
-            IpAddr::V4(_) => None,
-        })
+    let configured_bind_addr = config.bind_addr.and_then(|ip| match ip {
+        IpAddr::V6(addr) => Some(addr),
+        IpAddr::V4(_) => None,
+    });
+    if let (Some(configured_bind_addr), Some(datagram_source)) =
+        (configured_bind_addr, datagram_source)
+        && configured_bind_addr != datagram_source
+    {
+        return Err(MctxError::RawDatagramSourceMismatch {
+            datagram_source: IpAddr::V6(datagram_source),
+            configured_bind_addr: IpAddr::V6(configured_bind_addr),
+        });
+    }
+
+    let bind_addr = configured_bind_addr
+        .or(datagram_source)
         .or(match config.outgoing_interface {
             Some(OutgoingInterface::Ipv6Addr(addr)) => Some(addr),
             _ => None,
@@ -658,10 +689,11 @@ fn resolve_raw_ipv6_selection(
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn open_unix_raw_socket_v6_with_protocol(
     config: &RawPublicationConfig,
+    source_addr: Ipv6Addr,
     protocol: i32,
     hop_limit: u8,
 ) -> Result<RawTransmitSocket, MctxError> {
-    let selection = resolve_raw_ipv6_selection(config)?;
+    let selection = resolve_raw_ipv6_selection(config, Some(source_addr))?;
     let socket = Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::from(protocol)))
         .map_err(MctxError::RawSocketCreateFailed)?;
 
@@ -716,9 +748,11 @@ fn send_unix_raw_ipv6_datagram(
     parsed: ParsedRawIpDatagram,
     datagram: &[u8],
 ) -> Result<RawSendReport, MctxError> {
-    let group = match parsed.destination_ip {
-        IpAddr::V6(group) if group.is_multicast() => group,
-        IpAddr::V6(_) => match config.validation_mode {
+    let (source_addr, group) = match (parsed.source_ip, parsed.destination_ip) {
+        (IpAddr::V6(source_addr), IpAddr::V6(group)) if group.is_multicast() => {
+            (source_addr, group)
+        }
+        (IpAddr::V6(_), IpAddr::V6(_)) => match config.validation_mode {
             RawValidationMode::StrictMulticastDestination => {
                 return Err(MctxError::InvalidRawMulticastDestination);
             }
@@ -729,7 +763,7 @@ fn send_unix_raw_ipv6_datagram(
                 ));
             }
         },
-        IpAddr::V4(_) => {
+        (IpAddr::V6(_), IpAddr::V4(_)) | (IpAddr::V4(_), _) => {
             return Err(MctxError::RawPacketTransmitUnsupported(
                 "Unix raw IPv6 transmit cannot send IPv4 datagrams".to_string(),
             ));
@@ -742,6 +776,7 @@ fn send_unix_raw_ipv6_datagram(
     let effective_hop_limit = config.ttl.unwrap_or(parsed.ttl_or_hop_limit);
     let send_socket = open_unix_raw_socket_v6_with_protocol(
         config,
+        source_addr,
         i32::from(parsed.protocol),
         effective_hop_limit,
     )?;
@@ -879,6 +914,39 @@ mod tests {
             )))),
             Some(PublicationAddressFamily::Ipv4)
         );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn raw_ipv6_selection_uses_datagram_source_when_bind_addr_is_not_set() {
+        let loopback_index = resolve_ipv6_interface_index(Ipv6Addr::LOCALHOST).unwrap();
+        let selection = resolve_raw_ipv6_selection(
+            &RawPublicationConfig::ipv6().with_ipv6_interface_index(loopback_index),
+            Some(Ipv6Addr::LOCALHOST),
+        )
+        .unwrap();
+
+        assert_eq!(selection.bind_addr, Some(Ipv6Addr::LOCALHOST));
+        assert_eq!(selection.interface_index, loopback_index);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn raw_ipv6_selection_rejects_mismatched_configured_bind_addr() {
+        let err = resolve_raw_ipv6_selection(
+            &RawPublicationConfig::ipv6().with_bind_addr(Ipv6Addr::LOCALHOST),
+            Some("fd00::10".parse::<Ipv6Addr>().unwrap()),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            MctxError::RawDatagramSourceMismatch {
+                datagram_source,
+                configured_bind_addr,
+            } if datagram_source == IpAddr::V6("fd00::10".parse::<Ipv6Addr>().unwrap())
+                && configured_bind_addr == IpAddr::V6(Ipv6Addr::LOCALHOST)
+        ));
     }
 
     #[cfg(target_os = "macos")]

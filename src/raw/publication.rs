@@ -17,7 +17,6 @@ pub struct RawPublication {
 impl RawPublication {
     /// Creates and configures a new raw publication socket.
     pub fn new(id: RawPublicationId, config: RawPublicationConfig) -> Result<Self, MctxError> {
-        config.validate()?;
         let socket = open_raw_transmit_socket(&config)?;
 
         Ok(Self { id, config, socket })
@@ -39,26 +38,8 @@ impl RawPublication {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn raw_ipv6_publication_accepts_explicit_loopback_override() {
-        let publication = RawPublication::new(
-            RawPublicationId(2),
-            RawPublicationConfig::ipv6()
-                .with_ipv6_interface_index(7)
-                .with_loopback(false),
-        )
-        .unwrap();
-
-        assert_eq!(publication.config().loopback, Some(false));
-    }
-}
-
-#[cfg(all(test, target_os = "macos"))]
-mod macos_tests {
     use super::*;
 
     #[test]

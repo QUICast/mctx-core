@@ -77,6 +77,8 @@ Important distinction:
   observe
 - `bind_addr` and `outgoing_interface` only select where the datagram is
   emitted
+- on the current Linux/macOS IPv6 raw-socket backend, an explicit `bind_addr`
+  must agree with the datagram source when both are present
 
 The raw path never silently falls back to ordinary UDP payload send.
 
@@ -239,6 +241,7 @@ Practical notes:
 - IPv4 uses `IP_HDRINCL`
 - IPv6 multicast still sets `IPV6_MULTICAST_IF` explicitly, and link-local
   binds keep their interface scope
+- when both are present on IPv6, `bind_addr` must match the datagram source
 - for IPv6, the kernel rebuilds the base IPv6 header on transmit instead of
   accepting a caller-supplied full IPv6 header byte-for-byte
 - this keeps the source/group tuple and UDP payload semantics intact while

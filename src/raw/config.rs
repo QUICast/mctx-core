@@ -26,8 +26,10 @@ pub struct RawPublicationConfig {
     /// The local IP address used to select and validate the egress interface.
     ///
     /// The source IP seen by receivers still comes from the supplied datagram.
-    /// This field only constrains which local interface/address the kernel uses
-    /// when it emits the packet.
+    /// On backends where the kernel rebuilds part of the IPv6 header, this
+    /// address must agree with the datagram source when both are present.
+    /// Otherwise this field only constrains which local interface/address the
+    /// kernel uses when it emits the packet.
     pub bind_addr: Option<IpAddr>,
     /// Optional TTL or hop-limit override applied during transmit.
     pub ttl: Option<u8>,

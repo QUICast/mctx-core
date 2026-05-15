@@ -282,28 +282,6 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    fn context_snapshot(
-        publications_added: u64,
-        publications_removed: u64,
-        active_publications: usize,
-        total_send_calls: u64,
-        total_packets_sent: u64,
-        total_bytes_sent: u64,
-        total_send_errors: u64,
-        captured_at: SystemTime,
-    ) -> ContextMetricsSnapshot {
-        ContextMetricsSnapshot {
-            publications_added,
-            publications_removed,
-            active_publications,
-            total_send_calls,
-            total_packets_sent,
-            total_bytes_sent,
-            total_send_errors,
-            captured_at,
-        }
-    }
-
     fn publication_snapshot(
         send_calls: u64,
         packets_sent: u64,
@@ -322,17 +300,26 @@ mod tests {
 
     #[test]
     fn context_delta_since_uses_lifetime_total_fields() {
-        let earlier = context_snapshot(1, 0, 1, 10, 8, 800, 2, SystemTime::UNIX_EPOCH);
-        let later = context_snapshot(
-            2,
-            1,
-            1,
-            14,
-            11,
-            1250,
-            3,
-            SystemTime::UNIX_EPOCH + Duration::from_secs(2),
-        );
+        let earlier = ContextMetricsSnapshot {
+            publications_added: 1,
+            publications_removed: 0,
+            active_publications: 1,
+            total_send_calls: 10,
+            total_packets_sent: 8,
+            total_bytes_sent: 800,
+            total_send_errors: 2,
+            captured_at: SystemTime::UNIX_EPOCH,
+        };
+        let later = ContextMetricsSnapshot {
+            publications_added: 2,
+            publications_removed: 1,
+            active_publications: 1,
+            total_send_calls: 14,
+            total_packets_sent: 11,
+            total_bytes_sent: 1250,
+            total_send_errors: 3,
+            captured_at: SystemTime::UNIX_EPOCH + Duration::from_secs(2),
+        };
 
         let delta = later.delta_since(&earlier).unwrap();
 

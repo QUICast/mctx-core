@@ -152,6 +152,16 @@ pub fn validate_existing_header(path: &Path) -> Result<Option<Value>, std::io::E
                 "existing JSONL file contains more than one Heimdall header object",
             ));
         }
+
+        validate_sample_row(&parsed).map_err(|err| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "existing JSONL sample line {} is invalid: {}",
+                    non_empty_line_index, err
+                ),
+            )
+        })?;
     }
 
     Ok(parsed_header)
@@ -192,6 +202,7 @@ pub fn append_jsonl_sample_row(
     header: &Value,
     sample: &Value,
 ) -> Result<(), std::io::Error> {
+    validate_sample_row(sample)?;
     ensure_single_header(path, header)?;
 
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
@@ -221,6 +232,29 @@ fn is_header_object(value: &Value) -> bool {
         && node_id.is_some()
         && producer.is_some()
         && matches!(flags, Some(Value::Object(_)))
+}
+
+#[cfg(feature = "metrics")]
+fn validate_sample_row(sample: &Value) -> Result<(), std::io::Error> {
+    let Some(sample_object) = sample.as_object() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "JSONL sample rows must be JSON objects",
+        ));
+    };
+
+    for reserved_key in ["schema", "artifact_type", "node_id", "producer", "flags"] {
+        if sample_object.contains_key(reserved_key) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "JSONL sample rows must not contain reserved header field `{reserved_key}`"
+                ),
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(all(test, feature = "metrics"))]
@@ -367,6 +401,69 @@ mod tests {
             serde_json::to_string(&header).unwrap(),
             serde_json::to_string(&json!({"ts": 1.0, "interval_secs": 1.0})).unwrap(),
             serde_json::to_string(&header).unwrap(),
+        );
+        fs::write(&path, contents).unwrap();
+
+        let err = validate_existing_header(&path).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn sample_rows_with_reserved_header_fields_are_rejected() {
+        let path = std::env::temp_dir().join(format!(
+            "mctx_reserved_sample_fields_{}.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::ZERO)
+                .as_nanos()
+        ));
+        let header = json!({
+            "schema": HEIMDALL_JSONL_SCHEMA,
+            "artifact_type": NETWORK_ARTIFACT_TYPE,
+            "node_id": "sender-a",
+            "producer": "mctx-core/test",
+            "created_at": 1.0,
+            "flags": {"role": "sender"},
+        });
+        let err = append_jsonl_sample_row(
+            &path,
+            &header,
+            &json!({"ts": 1.0, "interval_secs": 1.0, "schema": HEIMDALL_JSONL_SCHEMA}),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn existing_sample_rows_with_reserved_header_fields_are_rejected() {
+        let path = std::env::temp_dir().join(format!(
+            "mctx_reserved_existing_sample_fields_{}.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::ZERO)
+                .as_nanos()
+        ));
+        let header = json!({
+            "schema": HEIMDALL_JSONL_SCHEMA,
+            "artifact_type": NETWORK_ARTIFACT_TYPE,
+            "node_id": "sender-a",
+            "producer": "mctx-core/test",
+            "created_at": 1.0,
+            "flags": {"role": "sender"},
+        });
+        let contents = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&header).unwrap(),
+            serde_json::to_string(
+                &json!({"ts": 1.0, "interval_secs": 1.0, "schema": HEIMDALL_JSONL_SCHEMA})
+            )
+            .unwrap(),
         );
         fs::write(&path, contents).unwrap();
 
