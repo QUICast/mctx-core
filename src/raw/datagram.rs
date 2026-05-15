@@ -13,6 +13,7 @@ pub(crate) struct ParsedRawIpDatagram {
     pub(crate) destination_ip: IpAddr,
     pub(crate) protocol: u8,
     pub(crate) header_len: usize,
+    pub(crate) ttl_or_hop_limit: u8,
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
@@ -88,6 +89,7 @@ fn parse_ipv4_datagram(datagram: &[u8]) -> Result<ParsedRawIpDatagram, MctxError
         )),
         protocol: datagram[9],
         header_len: ihl,
+        ttl_or_hop_limit: datagram[8],
     })
 }
 
@@ -117,6 +119,7 @@ fn parse_ipv6_datagram(datagram: &[u8]) -> Result<ParsedRawIpDatagram, MctxError
         destination_ip: IpAddr::V6(Ipv6Addr::from(destination)),
         protocol: datagram[6],
         header_len: 40,
+        ttl_or_hop_limit: datagram[7],
     })
 }
 
@@ -158,6 +161,7 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(239, 1, 2, 3))
         );
         assert_eq!(parsed.protocol, 17);
+        assert_eq!(parsed.ttl_or_hop_limit, 1);
     }
 
     #[test]
@@ -177,6 +181,7 @@ mod tests {
             IpAddr::V6("ff3e::8000:1234".parse::<Ipv6Addr>().unwrap())
         );
         assert_eq!(parsed.protocol, 17);
+        assert_eq!(parsed.ttl_or_hop_limit, 0);
     }
 
     #[test]

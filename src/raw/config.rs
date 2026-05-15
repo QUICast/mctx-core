@@ -25,16 +25,13 @@ pub struct RawPublicationConfig {
     pub outgoing_interface: Option<OutgoingInterface>,
     /// The local IP address used to select and validate the egress interface.
     ///
-    /// On Linux packet sockets this does not rewrite the source IP inside the
-    /// supplied datagram. The full datagram header is transmitted as provided.
+    /// The source IP seen by receivers still comes from the supplied datagram.
+    /// This field only constrains which local interface/address the kernel uses
+    /// when it emits the packet.
     pub bind_addr: Option<IpAddr>,
-    /// Optional TTL or hop-limit override applied directly to the IP header.
+    /// Optional TTL or hop-limit override applied during transmit.
     pub ttl: Option<u8>,
     /// Optional loopback preference.
-    ///
-    /// The first-pass Linux backend does not currently support explicit raw
-    /// multicast loopback control and returns an unsupported error when this
-    /// field is set.
     pub loopback: Option<bool>,
     /// Validation behavior for outbound datagrams.
     pub validation_mode: RawValidationMode,

@@ -236,17 +236,15 @@ println!("observed source {:?}", report.source_ip);
 This path is meant for AMT-style full-datagram forwarding where receivers must
 see the original source/group tuple. Current support is:
 
-- Linux: IPv4 and IPv6 via packet sockets
-- macOS: IPv4 and IPv6 via raw IP sockets
+- Linux: IPv4 via `IP_HDRINCL` raw sockets and IPv6 via raw IPv6 sockets
+- macOS: IPv4 via `IP_HDRINCL` raw sockets and IPv6 via raw IPv6 sockets
 - Windows: IPv4 via raw sockets
 
 All raw paths typically require elevated privileges such as `CAP_NET_RAW`,
 `root`, or Administrator rights.
 
-In current observed IPv4 ASM interop testing, macOS and Windows senders are
-seen by all three platforms, and Linux senders are seen by macOS and Windows
-peers. The one observed gap so far is Linux same-host receive for packets sent
-from the same Linux machine.
+In current observed IPv4 ASM interop testing, all three sender platforms are
+seen by all three receivers.
 
 More detail lives in [Raw Packet Transmit](docs/raw-packets.md).
 

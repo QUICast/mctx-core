@@ -105,8 +105,14 @@ mod tests {
     use super::*;
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     use crate::test_support::TEST_GROUP;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    use crate::test_support::recv_payload;
     #[cfg(target_os = "macos")]
-    use crate::test_support::{recv_payload, test_multicast_receiver};
+    use crate::test_support::test_multicast_receiver;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    use crate::test_support::test_multicast_receiver_v6;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    use std::net::Ipv6Addr;
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -216,6 +222,46 @@ mod tests {
         assert_eq!(report.bytes_sent, datagram.len());
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires CAP_NET_RAW or root; validates same-host IPv6 ASM raw receive on loopback"]
+    fn linux_raw_ipv6_same_host_smoke_test() {
+        run_raw_ipv6_same_host_smoke_test();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires root; validates same-host IPv6 ASM raw receive on loopback"]
+    fn macos_raw_ipv6_same_host_smoke_test() {
+        run_raw_ipv6_same_host_smoke_test();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn run_raw_ipv6_same_host_smoke_test() {
+        let group = "ff01::1234".parse::<Ipv6Addr>().unwrap();
+        let source = Ipv6Addr::LOCALHOST;
+        let (receiver, port) = test_multicast_receiver_v6(group, source);
+        let mut ctx = RawContext::new();
+        let id = ctx
+            .add_publication(
+                RawPublicationConfig::ipv6()
+                    .with_bind_addr(source)
+                    .with_outgoing_interface(source)
+                    .with_loopback(true),
+            )
+            .unwrap();
+
+        let payload = b"raw-v6-smoke";
+        let datagram = build_ipv6_udp_datagram(source, group, 4000, port, payload);
+        let report = ctx.send_raw(id, &datagram).unwrap();
+
+        assert_eq!(report.source_ip, Some(IpAddr::V6(source)));
+        assert_eq!(report.destination_ip, Some(IpAddr::V6(group)));
+        assert_eq!(report.ip_protocol, Some(17));
+        assert_eq!(report.bytes_sent, datagram.len());
+        assert_eq!(recv_payload(&receiver), payload);
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     fn build_ipv4_udp_datagram(
         source: Ipv4Addr,
@@ -246,12 +292,72 @@ mod tests {
         datagram
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn build_ipv6_udp_datagram(
+        source: Ipv6Addr,
+        destination: Ipv6Addr,
+        source_port: u16,
+        destination_port: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let payload_len = 8 + payload.len();
+        let mut datagram = vec![0u8; 40 + payload_len];
+
+        datagram[0] = 0x60;
+        datagram[4..6].copy_from_slice(&(payload_len as u16).to_be_bytes());
+        datagram[6] = 17;
+        datagram[7] = 1;
+        datagram[8..24].copy_from_slice(&source.octets());
+        datagram[24..40].copy_from_slice(&destination.octets());
+        datagram[40..42].copy_from_slice(&source_port.to_be_bytes());
+        datagram[42..44].copy_from_slice(&destination_port.to_be_bytes());
+        datagram[44..46].copy_from_slice(&(payload_len as u16).to_be_bytes());
+        datagram[46..48].copy_from_slice(&0u16.to_be_bytes());
+        datagram[48..].copy_from_slice(payload);
+
+        let checksum = udp_checksum_v6(source, destination, &datagram[40..]);
+        datagram[46..48].copy_from_slice(&checksum.to_be_bytes());
+        datagram
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     fn ipv4_header_checksum(header: &[u8]) -> u16 {
         let mut sum = 0u32;
 
         for chunk in header.chunks_exact(2) {
             sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+        }
+
+        while (sum >> 16) != 0 {
+            sum = (sum & 0xffff) + (sum >> 16);
+        }
+
+        !(sum as u16)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn udp_checksum_v6(source: Ipv6Addr, destination: Ipv6Addr, udp_packet: &[u8]) -> u16 {
+        let mut pseudo = Vec::with_capacity(40 + udp_packet.len() + (udp_packet.len() % 2));
+        pseudo.extend_from_slice(&source.octets());
+        pseudo.extend_from_slice(&destination.octets());
+        pseudo.extend_from_slice(&(udp_packet.len() as u32).to_be_bytes());
+        pseudo.extend_from_slice(&[0, 0, 0, 17]);
+        pseudo.extend_from_slice(udp_packet);
+
+        let checksum = ones_complement_checksum(&pseudo);
+        if checksum == 0 { 0xffff } else { checksum }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn ones_complement_checksum(bytes: &[u8]) -> u16 {
+        let mut sum = 0u32;
+
+        for chunk in bytes.chunks_exact(2) {
+            sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+        }
+
+        if !bytes.len().is_multiple_of(2) {
+            sum += (bytes[bytes.len() - 1] as u32) << 8;
         }
 
         while (sum >> 16) != 0 {

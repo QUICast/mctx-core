@@ -42,18 +42,35 @@ impl RawPublication {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
 
     #[test]
-    fn raw_publication_rejects_loopback_override_before_privileged_socket_setup() {
-        let err = RawPublication::new(
-            RawPublicationId(1),
-            RawPublicationConfig::ipv4()
-                .with_bind_addr(Ipv4Addr::new(192, 168, 1, 20))
+    fn raw_ipv6_publication_accepts_explicit_loopback_override() {
+        let publication = RawPublication::new(
+            RawPublicationId(2),
+            RawPublicationConfig::ipv6()
+                .with_ipv6_interface_index(7)
                 .with_loopback(false),
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(matches!(err, MctxError::RawPacketTransmitUnsupported(_)));
+        assert_eq!(publication.config().loopback, Some(false));
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use super::*;
+
+    #[test]
+    fn raw_ipv6_publication_accepts_explicit_loopback_override() {
+        let publication = RawPublication::new(
+            RawPublicationId(2),
+            RawPublicationConfig::ipv6()
+                .with_ipv6_interface_index(7)
+                .with_loopback(false),
+        )
+        .unwrap();
+
+        assert_eq!(publication.config().loopback, Some(false));
     }
 }

@@ -90,12 +90,14 @@ cargo run --features raw-packets --bin mctx_raw_send -- <group> <dst_port> <payl
 
 It builds a complete UDP-in-IP datagram and sends it through the raw API.
 
-On macOS, that often makes it useful for validation with ordinary multicast UDP
-receivers such as `mcrx_recv_meta`. On Linux and Windows, same-host UDP receive
-is not a reliable raw-send validation method, because the current raw backends
-do not guarantee that injected multicast datagrams are reflected back through
-the local host's normal multicast receive path. For those platforms, prefer a
-second machine or packet capture when validating raw transmit.
+That makes it useful for validation with ordinary multicast UDP receivers such
+as `mcrx_recv_meta`.
+
+For Linux and macOS, the current IPv6 backend uses raw IPv6 sockets rather than
+link-layer injection so the local host stack can still observe same-host
+multicast in practical UDP-in-IP tests. Windows raw IPv6 transmit is still not
+implemented, so cross-host validation and packet capture remain the right tools
+there.
 
 Example:
 
@@ -183,8 +185,10 @@ cargo run --features raw-packets --bin mctx_raw_send -- ff3e::8000:1234 5000 hel
 
 Current first-pass support:
 
-- Linux: implemented for IPv4 and IPv6 with packet sockets
-- macOS: implemented for IPv4 and IPv6 with raw IP sockets
+- Linux: IPv4 via `IP_HDRINCL` raw sockets, IPv6 via raw IPv6 sockets with a
+  kernel-built base IPv6 header
+- macOS: IPv4 via `IP_HDRINCL` raw sockets, IPv6 via raw IPv6 sockets with a
+  kernel-built base IPv6 header
 - Windows: implemented for IPv4 with raw sockets
 - other platforms: explicit unsupported error
 
@@ -197,46 +201,33 @@ observed with `mctx_raw_send` as sender and `mcrx-core` receivers:
 |---------|----------------|------------------|----------------|
 | macOS   | Seen           | Seen             | Seen           |
 | Windows | Seen           | Seen             | Seen           |
-| Linux   | Seen           | Seen             | Not seen       |
+| Linux   | Seen           | Seen             | Seen           |
 
-This matrix is specifically about IPv4 ASM testing so far. The only observed
-gap is Linux same-host receive for packets sent from the same Linux machine.
-Cross-host delivery from Linux has been observed to work.
+This matrix is specifically about IPv4 ASM testing so far. At the moment all
+three sender platforms have been observed to reach all three receivers.
 
 ### Linux
 
-The current implementation uses Linux packet sockets and requires an explicit
-egress interface selection.
+The current implementation uses raw IP sockets for IPv4 and raw IPv6 sockets
+for IPv6.
 
 Practical notes:
 
 - raw packet transmit usually requires `CAP_NET_RAW` or root
-- the current backend only supports Ethernet-like links
-- non-Ethernet links return `MctxError::RawUnsupportedLinkType(...)`
-- multicast destination MACs are derived directly from the multicast group:
-  - IPv4: `01:00:5e:xx:xx:xx`
-  - IPv6: `33:33:xx:xx:xx:xx`
+- the caller-supplied IPv4 header is transmitted with `IP_HDRINCL`
+- for IPv6, the API still accepts a complete IPv6 datagram, but Linux rebuilds
+  the base IPv6 header on transmit from the configured source, destination,
+  next-header, and hop-limit
+- this preserves the source/group tuple and transport header for AMT/SSM-style
+  UDP forwarding while allowing same-host multicast delivery through the local
+  IP stack
+- explicit loopback control is supported for the IPv4 and IPv6 raw-socket paths
 - non-multicast raw transmit is not currently implemented
-- TTL or hop-limit overrides are patched directly into the supplied IP header
-- explicit raw multicast loopback control is not currently implemented on the
-  Linux packet-socket backend
-- packets emitted through the Linux packet-socket backend may be visible on the
-  wire but not reflected back into same-host multicast UDP or raw receive
-  sockets in a portable way
-- in current observed IPv4 ASM testing, Linux-to-Linux same-host receive is the
-  one combination that has not been observed to work, even though Linux-to-other
-  hosts is visible on the wire and received by macOS and Windows peers
-- for Linux raw-send validation, prefer a second host on the LAN or packet
-  capture on the sender and receiver interfaces
-
-`bind_addr` on Linux packet sockets does not rewrite the datagram source IP.
-The source IP seen by receivers is the source IP already present in the caller's
-datagram bytes.
 
 ### macOS
 
-The macOS implementation currently uses raw IP sockets with header-included
-mode.
+The macOS implementation uses raw IP sockets for IPv4 and raw IPv6 sockets for
+IPv6.
 
 Practical notes:
 
@@ -245,9 +236,13 @@ Practical notes:
 - `bind_addr` is used as the exact local bind when provided
 - if `outgoing_interface` is given as an IP address without `bind_addr`,
   `mctx-core` binds to that exact local address before sending
+- IPv4 uses `IP_HDRINCL`
 - IPv6 multicast still sets `IPV6_MULTICAST_IF` explicitly, and link-local
   binds keep their interface scope
-- TTL or hop-limit overrides are patched directly into the supplied IP header
+- for IPv6, the kernel rebuilds the base IPv6 header on transmit instead of
+  accepting a caller-supplied full IPv6 header byte-for-byte
+- this keeps the source/group tuple and UDP payload semantics intact while
+  making same-host multicast receive practical
 
 ### Windows
 
@@ -272,12 +267,14 @@ Linux:
 
 ```bash
 MCTX_RAW_TEST_SOURCE_V4=192.168.1.20 cargo test --features raw-packets raw::context::tests::linux_raw_ipv4_send_report_smoke_test -- --ignored --exact --nocapture
+cargo test --features raw-packets raw::context::tests::linux_raw_ipv6_same_host_smoke_test -- --ignored --exact --nocapture
 ```
 
 macOS:
 
 ```bash
 MCTX_RAW_TEST_SOURCE_V4=192.168.1.20 cargo test --features raw-packets raw::context::tests::macos_raw_ipv4_send_smoke_test -- --ignored --exact --nocapture
+cargo test --features raw-packets raw::context::tests::macos_raw_ipv6_same_host_smoke_test -- --ignored --exact --nocapture
 ```
 
 Windows PowerShell:
@@ -303,6 +300,8 @@ The raw path validates:
 This API is intended for AMT-style full-datagram forwarding and other cases
 where source fidelity matters.
 
-`mctx-core` does not add AMT logic itself. It simply provides a way to inject
-the original datagram bytes without rewriting the IP header through a normal UDP
-socket.
+`mctx-core` does not add AMT logic itself. It simply provides a way to transmit
+the original source/group tuple and transport header without rewriting them
+through a normal UDP socket. On Linux and macOS IPv6, the kernel still rebuilds
+the base IPv6 header as part of the raw IPv6 socket API, so arbitrary IPv6
+header byte-for-byte fidelity is not promised there.

@@ -141,10 +141,13 @@ Important points:
   header
 - the source IP receivers observe comes from the supplied datagram, not from a
   UDP socket bind
-- Linux raw send currently requires an explicit Ethernet egress interface
-  selection and typically `CAP_NET_RAW` or root
+- Linux raw send uses raw IP sockets and typically requires `CAP_NET_RAW` or
+  root
 - macOS raw send supports IPv4 and IPv6 via raw IP sockets and typically
   requires root
+- on Linux and macOS IPv6, the kernel rebuilds the base IPv6 header during raw
+  transmit, but the configured source/group tuple, next-header, hop-limit, and
+  transport header are preserved for practical AMT/SSM-style UDP forwarding
 - Windows raw send currently supports IPv4 only and typically requires
   Administrator rights
 
