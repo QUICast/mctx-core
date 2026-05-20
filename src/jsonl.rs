@@ -34,6 +34,14 @@ pub struct MetricsJsonlOutputConfig {
     pub flags: Map<String, Value>,
 }
 
+/// Stateful JSONL writer that validates or writes the canonical header once,
+/// then appends compact sample rows without rescanning the whole file.
+#[cfg(feature = "metrics")]
+#[derive(Debug)]
+pub struct MetricsJsonlWriter {
+    file: File,
+}
+
 /// Infers a `node_id` from a metrics file path.
 ///
 /// Resolution order:
@@ -170,6 +178,11 @@ pub fn validate_existing_header(path: &Path) -> Result<Option<Value>, std::io::E
 /// Ensures a JSONL file has exactly one header at the top before samples.
 #[cfg(feature = "metrics")]
 pub fn ensure_single_header(path: &Path, header: &Value) -> Result<(), std::io::Error> {
+    open_jsonl_append_file(path, header).map(|_| ())
+}
+
+#[cfg(feature = "metrics")]
+fn open_jsonl_append_file(path: &Path, header: &Value) -> Result<File, std::io::Error> {
     match validate_existing_header(path)? {
         Some(existing) => {
             if !headers_are_compatible(&existing, header) {
@@ -179,7 +192,7 @@ pub fn ensure_single_header(path: &Path, header: &Value) -> Result<(), std::io::
                 ));
             }
 
-            Ok(())
+            OpenOptions::new().create(true).append(true).open(path)
         }
         None => {
             if let Some(parent) = path.parent()
@@ -190,7 +203,7 @@ pub fn ensure_single_header(path: &Path, header: &Value) -> Result<(), std::io::
             let mut file = OpenOptions::new().create(true).append(true).open(path)?;
             serde_json::to_writer(&mut file, header).map_err(std::io::Error::other)?;
             file.write_all(b"\n")?;
-            Ok(())
+            Ok(file)
         }
     }
 }
@@ -203,12 +216,27 @@ pub fn append_jsonl_sample_row(
     sample: &Value,
 ) -> Result<(), std::io::Error> {
     validate_sample_row(sample)?;
-    ensure_single_header(path, header)?;
-
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    let mut file = open_jsonl_append_file(path, header)?;
     serde_json::to_writer(&mut file, sample).map_err(std::io::Error::other)?;
     file.write_all(b"\n")?;
     Ok(())
+}
+
+#[cfg(feature = "metrics")]
+impl MetricsJsonlWriter {
+    /// Opens or creates a single-header JSONL file for repeated sample appends.
+    pub fn open(path: &Path, header: &Value) -> Result<Self, std::io::Error> {
+        Ok(Self {
+            file: open_jsonl_append_file(path, header)?,
+        })
+    }
+
+    /// Appends one compact sample row without rescanning the existing file.
+    pub fn append_sample_row(&mut self, sample: &Value) -> Result<(), std::io::Error> {
+        validate_sample_row(sample)?;
+        serde_json::to_writer(&mut self.file, sample).map_err(std::io::Error::other)?;
+        self.file.write_all(b"\n")
+    }
 }
 
 #[cfg(feature = "metrics")]
@@ -470,6 +498,46 @@ mod tests {
         let err = validate_existing_header(&path).unwrap_err();
 
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn stateful_writer_appends_without_repeating_the_header() {
+        let path = std::env::temp_dir().join(format!(
+            "mctx_stateful_writer_{}.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::ZERO)
+                .as_nanos()
+        ));
+        let header = json!({
+            "schema": HEIMDALL_JSONL_SCHEMA,
+            "artifact_type": NETWORK_ARTIFACT_TYPE,
+            "node_id": "sender-a",
+            "producer": "mctx-core/test",
+            "created_at": 1.0,
+            "flags": {"role": "sender"},
+        });
+
+        let mut writer = MetricsJsonlWriter::open(&path, &header).unwrap();
+        writer
+            .append_sample_row(&json!({"ts": 1.0, "interval_secs": 1.0}))
+            .unwrap();
+        writer
+            .append_sample_row(&json!({"ts": 2.0, "interval_secs": 1.0}))
+            .unwrap();
+        drop(writer);
+
+        let contents = fs::read_to_string(&path).unwrap();
+        let lines = contents
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect::<Vec<_>>();
+        assert_eq!(lines.len(), 3);
+        assert!(is_header_object(&serde_json::from_str(lines[0]).unwrap()));
+        assert!(!is_header_object(&serde_json::from_str(lines[1]).unwrap()));
+        assert!(!is_header_object(&serde_json::from_str(lines[2]).unwrap()));
 
         let _ = fs::remove_file(path);
     }

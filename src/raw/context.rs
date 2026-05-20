@@ -1,10 +1,12 @@
 use crate::error::MctxError;
 use crate::raw::{RawPublication, RawPublicationConfig, RawPublicationId, RawSendReport};
+use std::collections::HashMap;
 
 /// Owns and manages the set of active raw multicast publications.
 #[derive(Debug, Default)]
 pub struct RawContext {
     publications: Vec<RawPublication>,
+    publication_indices: HashMap<RawPublicationId, usize>,
     next_publication_id: u64,
 }
 
@@ -13,6 +15,7 @@ impl RawContext {
     pub fn new() -> Self {
         Self {
             publications: Vec::new(),
+            publication_indices: HashMap::new(),
             next_publication_id: 1,
         }
     }
@@ -24,23 +27,19 @@ impl RawContext {
 
     /// Returns true if a raw publication with the given ID exists.
     pub fn contains_publication(&self, id: RawPublicationId) -> bool {
-        self.publications
-            .iter()
-            .any(|publication| publication.id() == id)
+        self.publication_indices.contains_key(&id)
     }
 
     /// Returns the raw publication with the given ID, if present.
     pub fn get_publication(&self, id: RawPublicationId) -> Option<&RawPublication> {
-        self.publications
-            .iter()
-            .find(|publication| publication.id() == id)
+        let index = *self.publication_indices.get(&id)?;
+        self.publications.get(index)
     }
 
     /// Returns the raw publication mutably with the given ID, if present.
     pub fn get_publication_mut(&mut self, id: RawPublicationId) -> Option<&mut RawPublication> {
-        self.publications
-            .iter_mut()
-            .find(|publication| publication.id() == id)
+        let index = *self.publication_indices.get(&id)?;
+        self.publications.get_mut(index)
     }
 
     fn ensure_publication_config_is_unique(
@@ -69,7 +68,9 @@ impl RawContext {
         self.next_publication_id += 1;
 
         let publication = RawPublication::new(id, config)?;
+        let index = self.publications.len();
         self.publications.push(publication);
+        self.publication_indices.insert(id, index);
         Ok(id)
     }
 
@@ -80,12 +81,14 @@ impl RawContext {
 
     /// Extracts one raw publication from the context.
     pub fn take_publication(&mut self, id: RawPublicationId) -> Option<RawPublication> {
-        let index = self
-            .publications
-            .iter()
-            .position(|publication| publication.id() == id)?;
+        let index = self.publication_indices.remove(&id)?;
+        let publication = self.publications.swap_remove(index);
+        if index < self.publications.len() {
+            let moved_id = self.publications[index].id();
+            self.publication_indices.insert(moved_id, index);
+        }
 
-        Some(self.publications.swap_remove(index))
+        Some(publication)
     }
 
     /// Sends one full IP datagram through the selected raw publication.
@@ -125,6 +128,26 @@ mod tests {
             .add_publication(RawPublicationConfig::ipv4())
             .unwrap_err();
         assert!(matches!(err, MctxError::RawInterfaceRequired));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn raw_context_updates_id_lookup_after_swap_remove() {
+        let mut ctx = RawContext::new();
+        let first = ctx
+            .add_publication(RawPublicationConfig::ipv6().with_ipv6_interface_index(7))
+            .unwrap();
+        let second = ctx
+            .add_publication(RawPublicationConfig::ipv6().with_ipv6_interface_index(8))
+            .unwrap();
+
+        assert!(ctx.remove_publication(first));
+        assert!(!ctx.contains_publication(first));
+        assert!(ctx.contains_publication(second));
+        assert_eq!(
+            ctx.get_publication(second).map(RawPublication::id),
+            Some(second)
+        );
     }
 
     #[cfg(windows)]

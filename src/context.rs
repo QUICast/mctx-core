@@ -210,6 +210,7 @@ impl Context {
     /// If one publication fails, reports already written into `out` are preserved.
     pub fn send_all(&self, payload: &[u8], out: &mut Vec<SendReport>) -> Result<usize, MctxError> {
         let before = out.len();
+        out.reserve(self.publications.len());
 
         for publication in &self.publications {
             match publication.send(payload) {

@@ -4,7 +4,7 @@ mod send_args;
 use mctx_core::Context;
 #[cfg(feature = "metrics")]
 use mctx_core::jsonl::{
-    MetricsJsonlOutputConfig, NETWORK_ARTIFACT_TYPE, append_jsonl_sample_row, header_json,
+    MetricsJsonlOutputConfig, MetricsJsonlWriter, NETWORK_ARTIFACT_TYPE, header_json,
     infer_node_id_from_path, unix_timestamp_secs,
 };
 #[cfg(feature = "metrics")]
@@ -49,6 +49,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     #[cfg(feature = "metrics")]
     let _ = metrics_sampler.sample();
     #[cfg(feature = "metrics")]
+    let mut metrics_writer: Option<MetricsJsonlWriter> = None;
+    #[cfg(feature = "metrics")]
     let mut next_summary_at =
         summary_interval.map(|summary_interval| Instant::now() + summary_interval);
 
@@ -63,7 +65,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         if let (Some(summary_interval), Some(deadline)) = (summary_interval, next_summary_at)
             && Instant::now() >= deadline
         {
-            emit_metrics_summary(&context, &mut metrics_sampler, summary_output.as_ref())?;
+            emit_metrics_summary(
+                &context,
+                &mut metrics_sampler,
+                summary_output.as_ref(),
+                &mut metrics_writer,
+            )?;
             next_summary_at = Some(Instant::now() + summary_interval);
         }
 
@@ -74,7 +81,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     #[cfg(feature = "metrics")]
     if summary_output.is_some() || summary_interval.is_some() {
-        emit_metrics_summary(&context, &mut metrics_sampler, summary_output.as_ref())?;
+        emit_metrics_summary(
+            &context,
+            &mut metrics_sampler,
+            summary_output.as_ref(),
+            &mut metrics_writer,
+        )?;
     }
 
     Ok(())
@@ -231,11 +243,12 @@ fn emit_metrics_summary(
     context: &Context,
     metrics_sampler: &mut ContextMetricsSampler<'_>,
     output: Option<&MetricsJsonlOutputConfig>,
+    writer: &mut Option<MetricsJsonlWriter>,
 ) -> Result<(), Box<dyn Error>> {
     let snapshot = context.metrics_snapshot();
     if let Some(delta) = metrics_sampler.sample_snapshot(snapshot.clone()) {
         if let Some(output) = output {
-            write_metrics_summary_jsonl(&snapshot, &delta, output)?;
+            write_metrics_summary_jsonl(&snapshot, &delta, output, writer)?;
         } else {
             print_metrics_summary(&snapshot, &delta);
         }
@@ -249,14 +262,8 @@ fn write_metrics_summary_jsonl(
     snapshot: &ContextMetricsSnapshot,
     delta: &ContextMetricsDelta,
     output: &MetricsJsonlOutputConfig,
+    writer: &mut Option<MetricsJsonlWriter>,
 ) -> Result<(), std::io::Error> {
-    let header = header_json(
-        NETWORK_ARTIFACT_TYPE,
-        SENDER_PRODUCER,
-        &output.node_id,
-        snapshot.captured_at,
-        &output.flags,
-    );
     let sample = json!({
         "ts": unix_timestamp_secs(snapshot.captured_at),
         "interval_secs": delta.interval_secs,
@@ -279,7 +286,21 @@ fn write_metrics_summary_jsonl(
         "send_errors_per_sec": delta.send_errors_per_sec(),
     });
 
-    append_jsonl_sample_row(&output.network_path, &header, &sample)
+    if writer.is_none() {
+        let header = header_json(
+            NETWORK_ARTIFACT_TYPE,
+            SENDER_PRODUCER,
+            &output.node_id,
+            snapshot.captured_at,
+            &output.flags,
+        );
+        *writer = Some(MetricsJsonlWriter::open(&output.network_path, &header)?);
+    }
+
+    writer
+        .as_mut()
+        .expect("metrics writer is initialized before append")
+        .append_sample_row(&sample)
 }
 
 #[cfg(feature = "metrics")]
@@ -397,8 +418,8 @@ mod tests {
             bytes_sent: 500,
             send_errors: 1,
         };
-
-        write_metrics_summary_jsonl(&snapshot, &delta, &output).unwrap();
+        let mut writer = None;
+        write_metrics_summary_jsonl(&snapshot, &delta, &output, &mut writer).unwrap();
 
         let later_snapshot = ContextMetricsSnapshot {
             total_send_calls: 12,
@@ -417,7 +438,7 @@ mod tests {
             send_errors: 0,
         };
 
-        write_metrics_summary_jsonl(&later_snapshot, &later_delta, &output).unwrap();
+        write_metrics_summary_jsonl(&later_snapshot, &later_delta, &output, &mut writer).unwrap();
 
         let contents = fs::read_to_string(&path).unwrap();
         let lines = contents

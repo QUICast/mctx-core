@@ -148,20 +148,20 @@ pub(crate) fn send_raw_ip_datagram(
     let parsed = parse_raw_ip_datagram(ip_datagram)?;
     validate_datagram_against_config(parsed, config)?;
 
-    let datagram_storage;
-    let datagram = if let Some(ttl) = config.ttl {
-        datagram_storage = apply_ttl_or_hop_limit_override(ip_datagram, parsed, ttl);
-        datagram_storage.as_slice()
-    } else {
-        ip_datagram
-    };
-
     match socket.linux_backend {
         LinuxRawTransmitBackend::RawIpv4 => {
+            let datagram_storage;
+            let datagram =
+                if let Some(ttl) = config.ttl.filter(|ttl| *ttl != parsed.ttl_or_hop_limit) {
+                    datagram_storage = apply_ttl_or_hop_limit_override(ip_datagram, parsed, ttl);
+                    datagram_storage.as_slice()
+                } else {
+                    ip_datagram
+                };
             send_linux_raw_ipv4_datagram(socket, publication_id, config, parsed, datagram)
         }
         LinuxRawTransmitBackend::RawIpv6 => {
-            send_linux_raw_ipv6_datagram(socket, publication_id, config, parsed, datagram)
+            send_linux_raw_ipv6_datagram(socket, publication_id, config, parsed, ip_datagram)
         }
     }
 }
@@ -179,10 +179,9 @@ pub(crate) fn send_raw_ip_datagram(
     if parsed.family != socket.family {
         return Err(MctxError::InvalidRawIpDatagram);
     }
-
-    let datagram = prepare_macos_datagram_for_send(ip_datagram, parsed, config.ttl);
     match socket.macos_backend {
         MacosRawTransmitBackend::RawIpv4 => {
+            let datagram = prepare_macos_ipv4_datagram_for_send(ip_datagram, parsed, config.ttl);
             let send_socket =
                 cached_raw_ipv4_send_socket(socket, config, i32::from(parsed.protocol))?;
             let group = match parsed.destination_ip {
@@ -202,7 +201,7 @@ pub(crate) fn send_raw_ip_datagram(
             ))
         }
         MacosRawTransmitBackend::RawIpv6 => {
-            send_macos_raw_ipv6_datagram(socket, publication_id, config, parsed, &datagram)
+            send_macos_raw_ipv6_datagram(socket, publication_id, config, parsed, ip_datagram)
         }
     }
 }
@@ -290,7 +289,7 @@ pub(crate) fn send_raw_ip_datagram(
     }
 
     let datagram_storage;
-    let datagram = if let Some(ttl) = config.ttl {
+    let datagram = if let Some(ttl) = config.ttl.filter(|ttl| *ttl != parsed.ttl_or_hop_limit) {
         datagram_storage = apply_ttl_or_hop_limit_override(ip_datagram, parsed, ttl);
         datagram_storage.as_slice()
     } else {
@@ -923,20 +922,18 @@ fn send_unix_raw_ipv6_datagram(
 }
 
 #[cfg(target_os = "macos")]
-fn prepare_macos_datagram_for_send(
+fn prepare_macos_ipv4_datagram_for_send(
     ip_datagram: &[u8],
     parsed: ParsedRawIpDatagram,
     ttl_override: Option<u8>,
 ) -> Vec<u8> {
-    let mut datagram = if let Some(ttl) = ttl_override {
+    let mut datagram = if let Some(ttl) = ttl_override.filter(|ttl| *ttl != parsed.ttl_or_hop_limit)
+    {
         apply_ttl_or_hop_limit_override(ip_datagram, parsed, ttl)
     } else {
         ip_datagram.to_vec()
     };
-
-    if parsed.family == PublicationAddressFamily::Ipv4 {
-        normalize_macos_ipv4_header_for_hdrincl(&mut datagram);
-    }
+    normalize_macos_ipv4_header_for_hdrincl(&mut datagram);
 
     datagram
 }
@@ -1066,7 +1063,7 @@ mod tests {
     fn macos_ipv4_hdrincl_header_is_normalized_to_host_order() {
         let datagram = build_ipv4_datagram(Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(239, 1, 2, 3));
         let parsed = parse_raw_ip_datagram(&datagram).unwrap();
-        let normalized = prepare_macos_datagram_for_send(&datagram, parsed, None);
+        let normalized = prepare_macos_ipv4_datagram_for_send(&datagram, parsed, None);
 
         assert_eq!(
             &normalized[2..4],
