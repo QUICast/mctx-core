@@ -12,6 +12,8 @@ use crate::raw::datagram::{ParsedRawIpDatagram, parse_raw_ip_datagram};
 use crate::raw::{RawPublicationConfig, RawPublicationId, RawSendReport};
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+use std::collections::HashMap;
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 use std::net::Ipv6Addr;
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
@@ -19,12 +21,18 @@ use std::net::SocketAddrV4;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::net::SocketAddrV6;
 use std::net::{IpAddr, Ipv4Addr};
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+use std::sync::{Arc, Mutex};
 #[cfg(windows)]
 use windows_sys::Win32::Networking::WinSock::IPPROTO_RAW;
 
 pub(crate) struct RawTransmitSocket {
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     socket: Option<Socket>,
+    #[cfg(any(target_os = "macos", windows))]
+    raw_ipv4_protocol_sockets: Mutex<HashMap<i32, Arc<Socket>>>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    unix_raw_ipv6_sockets: Mutex<HashMap<UnixRawIpv6SocketCacheKey, Arc<Socket>>>,
     family: PublicationAddressFamily,
     interface_index: Option<u32>,
     local_bind_addr: Option<IpAddr>,
@@ -43,6 +51,24 @@ impl std::fmt::Debug for RawTransmitSocket {
             .field("local_bind_addr", &self.local_bind_addr);
         #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         debug.field("has_socket", &self.socket.is_some());
+        #[cfg(any(target_os = "macos", windows))]
+        debug.field(
+            "cached_raw_ipv4_protocol_socket_count",
+            &self
+                .raw_ipv4_protocol_sockets
+                .lock()
+                .expect("raw IPv4 socket cache mutex poisoned")
+                .len(),
+        );
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        debug.field(
+            "cached_unix_raw_ipv6_socket_count",
+            &self
+                .unix_raw_ipv6_sockets
+                .lock()
+                .expect("Unix raw IPv6 socket cache mutex poisoned")
+                .len(),
+        );
         #[cfg(target_os = "linux")]
         debug.field("linux_backend", &self.linux_backend);
         #[cfg(target_os = "macos")]
@@ -158,20 +184,17 @@ pub(crate) fn send_raw_ip_datagram(
     match socket.macos_backend {
         MacosRawTransmitBackend::RawIpv4 => {
             let send_socket =
-                open_macos_raw_socket_v4_with_protocol(config, i32::from(parsed.protocol))?;
+                cached_raw_ipv4_send_socket(socket, config, i32::from(parsed.protocol))?;
             let group = match parsed.destination_ip {
                 IpAddr::V4(group) => group,
                 IpAddr::V6(_) => unreachable!("validated above"),
             };
             let bytes_sent = send_socket
-                .socket
-                .as_ref()
-                .expect("macOS raw IPv4 send socket is opened per send")
                 .send_to(&datagram, &SockAddr::from(SocketAddrV4::new(group, 0)))
                 .map_err(MctxError::RawSendFailed)?;
 
             Ok(raw_send_report(
-                &send_socket,
+                socket,
                 publication_id,
                 parsed,
                 bytes_sent,
@@ -252,7 +275,7 @@ fn send_macos_raw_ipv6_datagram(
 
 #[cfg(windows)]
 pub(crate) fn send_raw_ip_datagram(
-    _socket: &RawTransmitSocket,
+    socket: &RawTransmitSocket,
     publication_id: RawPublicationId,
     config: &RawPublicationConfig,
     ip_datagram: &[u8],
@@ -278,17 +301,14 @@ pub(crate) fn send_raw_ip_datagram(
         IpAddr::V4(group) => SocketAddrV4::new(group, 0),
         IpAddr::V6(_) => unreachable!("validated above"),
     };
-    let send_socket = open_windows_raw_socket_v4_with_protocol(config, i32::from(parsed.protocol))?;
+    let send_socket = cached_raw_ipv4_send_socket(socket, config, i32::from(parsed.protocol))?;
 
     let bytes_sent = send_socket
-        .socket
-        .as_ref()
-        .expect("Windows raw IPv4 send socket is opened per send")
         .send_to(datagram, &SockAddr::from(destination))
         .map_err(MctxError::RawSendFailed)?;
 
     Ok(raw_send_report(
-        &send_socket,
+        socket,
         publication_id,
         parsed,
         bytes_sent,
@@ -350,6 +370,25 @@ fn raw_send_report(
     bytes_sent: usize,
     outgoing_interface: Option<OutgoingInterface>,
 ) -> RawSendReport {
+    raw_send_report_with_metadata(
+        publication_id,
+        parsed,
+        bytes_sent,
+        outgoing_interface,
+        socket.local_bind_addr,
+        socket.interface_index,
+    )
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
+fn raw_send_report_with_metadata(
+    publication_id: RawPublicationId,
+    parsed: ParsedRawIpDatagram,
+    bytes_sent: usize,
+    outgoing_interface: Option<OutgoingInterface>,
+    local_bind_addr: Option<IpAddr>,
+    outgoing_interface_index: Option<u32>,
+) -> RawSendReport {
     RawSendReport {
         publication_id,
         family: parsed.family,
@@ -357,9 +396,9 @@ fn raw_send_report(
         destination_ip: Some(parsed.destination_ip),
         ip_protocol: Some(parsed.protocol),
         bytes_sent,
-        local_bind_addr: socket.local_bind_addr,
+        local_bind_addr,
         outgoing_interface,
-        outgoing_interface_index: socket.interface_index,
+        outgoing_interface_index,
     }
 }
 
@@ -456,6 +495,10 @@ fn open_linux_raw_socket_v4(config: &RawPublicationConfig) -> Result<RawTransmit
 
     Ok(RawTransmitSocket {
         socket: Some(socket),
+        #[cfg(any(target_os = "macos", windows))]
+        raw_ipv4_protocol_sockets: Mutex::new(HashMap::new()),
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        unix_raw_ipv6_sockets: Mutex::new(HashMap::new()),
         family: PublicationAddressFamily::Ipv4,
         interface_index: Some(selection.interface_index),
         local_bind_addr: Some(IpAddr::V4(selection.bind_addr)),
@@ -469,6 +512,9 @@ fn open_linux_raw_socket_v6(config: &RawPublicationConfig) -> Result<RawTransmit
     Ok(RawTransmitSocket {
         family: PublicationAddressFamily::Ipv6,
         socket: None,
+        #[cfg(any(target_os = "macos", windows))]
+        raw_ipv4_protocol_sockets: Mutex::new(HashMap::new()),
+        unix_raw_ipv6_sockets: Mutex::new(HashMap::new()),
         interface_index: Some(selection.interface_index),
         local_bind_addr: selection.bind_addr.map(IpAddr::V6),
         linux_backend: LinuxRawTransmitBackend::RawIpv6,
@@ -484,23 +530,8 @@ fn open_macos_raw_socket_v4(config: &RawPublicationConfig) -> Result<RawTransmit
 
     Ok(RawTransmitSocket {
         socket: None,
-        family: PublicationAddressFamily::Ipv4,
-        interface_index: Some(selection.interface_index),
-        local_bind_addr: Some(IpAddr::V4(selection.bind_addr)),
-        macos_backend: MacosRawTransmitBackend::RawIpv4,
-    })
-}
-
-#[cfg(target_os = "macos")]
-fn open_macos_raw_socket_v4_with_protocol(
-    config: &RawPublicationConfig,
-    protocol: i32,
-) -> Result<RawTransmitSocket, MctxError> {
-    let selection = resolve_raw_ipv4_selection(config)?;
-    let socket = open_raw_ipv4_socket_with_protocol(selection, config.loopback, protocol)?;
-
-    Ok(RawTransmitSocket {
-        socket: Some(socket),
+        raw_ipv4_protocol_sockets: Mutex::new(HashMap::new()),
+        unix_raw_ipv6_sockets: Mutex::new(HashMap::new()),
         family: PublicationAddressFamily::Ipv4,
         interface_index: Some(selection.interface_index),
         local_bind_addr: Some(IpAddr::V4(selection.bind_addr)),
@@ -513,6 +544,8 @@ fn open_macos_raw_socket_v6(config: &RawPublicationConfig) -> Result<RawTransmit
     let selection = resolve_raw_ipv6_selection(config, None)?;
     Ok(RawTransmitSocket {
         socket: None,
+        raw_ipv4_protocol_sockets: Mutex::new(HashMap::new()),
+        unix_raw_ipv6_sockets: Mutex::new(HashMap::new()),
         family: PublicationAddressFamily::Ipv6,
         interface_index: Some(selection.interface_index),
         local_bind_addr: selection.bind_addr.map(IpAddr::V6),
@@ -531,22 +564,7 @@ fn open_windows_raw_socket_v4(
 
     Ok(RawTransmitSocket {
         socket: None,
-        family: PublicationAddressFamily::Ipv4,
-        interface_index: Some(selection.interface_index),
-        local_bind_addr: Some(IpAddr::V4(selection.bind_addr)),
-    })
-}
-
-#[cfg(windows)]
-fn open_windows_raw_socket_v4_with_protocol(
-    config: &RawPublicationConfig,
-    protocol: i32,
-) -> Result<RawTransmitSocket, MctxError> {
-    let selection = resolve_raw_ipv4_selection(config)?;
-    let socket = open_raw_ipv4_socket_with_protocol(selection, config.loopback, protocol)?;
-
-    Ok(RawTransmitSocket {
-        socket: Some(socket),
+        raw_ipv4_protocol_sockets: Mutex::new(HashMap::new()),
         family: PublicationAddressFamily::Ipv4,
         interface_index: Some(selection.interface_index),
         local_bind_addr: Some(IpAddr::V4(selection.bind_addr)),
@@ -590,6 +608,15 @@ struct RawIpv4Selection {
     bind_addr: Ipv4Addr,
     interface_addr: Ipv4Addr,
     interface_index: u32,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct UnixRawIpv6SocketCacheKey {
+    bind_addr: Option<Ipv6Addr>,
+    interface_index: u32,
+    protocol: i32,
+    hop_limit: u8,
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -687,13 +714,12 @@ fn resolve_raw_ipv6_selection(
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn open_unix_raw_socket_v6_with_protocol(
-    config: &RawPublicationConfig,
-    source_addr: Ipv6Addr,
+fn open_unix_raw_ipv6_socket_with_selection(
+    selection: RawIpv6Selection,
     protocol: i32,
     hop_limit: u8,
-) -> Result<RawTransmitSocket, MctxError> {
-    let selection = resolve_raw_ipv6_selection(config, Some(source_addr))?;
+    loopback: Option<bool>,
+) -> Result<Socket, MctxError> {
     let socket = Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::from(protocol)))
         .map_err(MctxError::RawSocketCreateFailed)?;
 
@@ -722,27 +748,114 @@ fn open_unix_raw_socket_v6_with_protocol(
         .set_multicast_hops_v6(u32::from(hop_limit))
         .map_err(MctxError::SocketOptionFailed)?;
 
-    if let Some(loopback) = config.loopback {
+    if let Some(loopback) = loopback {
         socket
             .set_multicast_loop_v6(loopback)
             .map_err(MctxError::SocketOptionFailed)?;
     }
 
-    Ok(RawTransmitSocket {
-        socket: Some(socket),
-        family: PublicationAddressFamily::Ipv6,
-        interface_index: Some(selection.interface_index),
-        local_bind_addr: selection.bind_addr.map(IpAddr::V6),
-        #[cfg(target_os = "linux")]
-        linux_backend: LinuxRawTransmitBackend::RawIpv6,
-        #[cfg(target_os = "macos")]
-        macos_backend: MacosRawTransmitBackend::RawIpv6,
+    Ok(socket)
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn cached_raw_ipv4_send_socket(
+    socket: &RawTransmitSocket,
+    config: &RawPublicationConfig,
+    protocol: i32,
+) -> Result<Arc<Socket>, MctxError> {
+    if let Some(cached) = socket
+        .raw_ipv4_protocol_sockets
+        .lock()
+        .expect("raw IPv4 socket cache mutex poisoned")
+        .get(&protocol)
+        .cloned()
+    {
+        return Ok(cached);
+    }
+
+    let selection = resolve_raw_ipv4_selection(config)?;
+    let new_socket = Arc::new(open_raw_ipv4_socket_with_protocol(
+        selection,
+        config.loopback,
+        protocol,
+    )?);
+
+    let mut cache = socket
+        .raw_ipv4_protocol_sockets
+        .lock()
+        .expect("raw IPv4 socket cache mutex poisoned");
+    Ok(Arc::clone(
+        cache
+            .entry(protocol)
+            .or_insert_with(|| Arc::clone(&new_socket)),
+    ))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Debug, Clone)]
+struct CachedUnixRawIpv6Socket {
+    socket: Arc<Socket>,
+    local_bind_addr: Option<IpAddr>,
+    interface_index: u32,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn cached_unix_raw_ipv6_send_socket(
+    socket: &RawTransmitSocket,
+    config: &RawPublicationConfig,
+    source_addr: Ipv6Addr,
+    protocol: i32,
+    hop_limit: u8,
+) -> Result<CachedUnixRawIpv6Socket, MctxError> {
+    let selection = resolve_raw_ipv6_selection(config, Some(source_addr))?;
+    let cache_key = UnixRawIpv6SocketCacheKey {
+        bind_addr: selection.bind_addr,
+        interface_index: selection.interface_index,
+        protocol,
+        hop_limit,
+    };
+
+    if let Some(cached) = socket
+        .unix_raw_ipv6_sockets
+        .lock()
+        .expect("Unix raw IPv6 socket cache mutex poisoned")
+        .get(&cache_key)
+        .cloned()
+    {
+        return Ok(CachedUnixRawIpv6Socket {
+            socket: cached,
+            local_bind_addr: cache_key.bind_addr.map(IpAddr::V6),
+            interface_index: cache_key.interface_index,
+        });
+    }
+
+    let new_socket = Arc::new(open_unix_raw_ipv6_socket_with_selection(
+        selection,
+        protocol,
+        hop_limit,
+        config.loopback,
+    )?);
+
+    let mut cache = socket
+        .unix_raw_ipv6_sockets
+        .lock()
+        .expect("Unix raw IPv6 socket cache mutex poisoned");
+    let socket = Arc::clone(
+        cache
+            .entry(cache_key)
+            .or_insert_with(|| Arc::clone(&new_socket)),
+    );
+
+    Ok(CachedUnixRawIpv6Socket {
+        socket,
+        local_bind_addr: cache_key.bind_addr.map(IpAddr::V6),
+        interface_index: cache_key.interface_index,
     })
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn send_unix_raw_ipv6_datagram(
-    _socket: &RawTransmitSocket,
+    socket: &RawTransmitSocket,
     publication_id: RawPublicationId,
     config: &RawPublicationConfig,
     parsed: ParsedRawIpDatagram,
@@ -774,20 +887,18 @@ fn send_unix_raw_ipv6_datagram(
         .get(parsed.header_len..)
         .ok_or(MctxError::InvalidRawIpDatagram)?;
     let effective_hop_limit = config.ttl.unwrap_or(parsed.ttl_or_hop_limit);
-    let send_socket = open_unix_raw_socket_v6_with_protocol(
+    let send_socket = cached_unix_raw_ipv6_send_socket(
+        socket,
         config,
         source_addr,
         i32::from(parsed.protocol),
         effective_hop_limit,
     )?;
-    let destination_scope_id =
-        ipv6_destination_scope_id(group, send_socket.interface_index.unwrap_or(0));
+    let destination_scope_id = ipv6_destination_scope_id(group, send_socket.interface_index);
     let destination = SocketAddrV6::new(group, 0, 0, destination_scope_id);
 
     let bytes_sent = send_socket
         .socket
-        .as_ref()
-        .expect("Unix raw IPv6 send socket is opened per send")
         .send_to(payload, &SockAddr::from(destination))
         .map_err(MctxError::RawSendFailed)?;
 
@@ -801,12 +912,13 @@ fn send_unix_raw_ipv6_datagram(
         )));
     }
 
-    Ok(raw_send_report(
-        &send_socket,
+    Ok(raw_send_report_with_metadata(
         publication_id,
         parsed,
         datagram.len(),
         config.outgoing_interface,
+        send_socket.local_bind_addr,
+        Some(send_socket.interface_index),
     ))
 }
 
