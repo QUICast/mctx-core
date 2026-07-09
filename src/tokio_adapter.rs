@@ -19,7 +19,8 @@ pub enum TokioSendError {
 /// Thin Tokio wrapper around an owned publication.
 ///
 /// On Unix this uses `tokio::io::unix::AsyncFd` to wait for write readiness.
-/// On other platforms it falls back to an async sleep-and-retry loop.
+/// On other platforms it registers a cloned socket handle with Tokio while the
+/// original publication remains available for metadata and metrics.
 #[derive(Debug)]
 pub struct TokioPublication {
     #[cfg(unix)]
@@ -27,7 +28,7 @@ pub struct TokioPublication {
     #[cfg(not(unix))]
     inner: Publication,
     #[cfg(not(unix))]
-    poll_interval: Duration,
+    readiness: tokio::net::UdpSocket,
 }
 
 impl TokioPublication {
@@ -42,9 +43,12 @@ impl TokioPublication {
 
         #[cfg(not(unix))]
         {
+            let readiness_socket = publication.socket().try_clone()?;
+            let readiness_socket: std::net::UdpSocket = readiness_socket.into();
+            readiness_socket.set_nonblocking(true)?;
             Ok(Self {
                 inner: publication,
-                poll_interval: Duration::from_millis(10),
+                readiness: tokio::net::UdpSocket::from_std(readiness_socket)?,
             })
         }
     }
@@ -75,10 +79,10 @@ impl TokioPublication {
         }
     }
 
-    /// Overrides the async poll interval used on platforms without `AsyncFd`.
+    /// Compatibility no-op retained now that non-Unix platforms use socket
+    /// readiness instead of polling.
     #[cfg(not(unix))]
-    pub fn with_poll_interval(mut self, poll_interval: Duration) -> Self {
-        self.poll_interval = poll_interval;
+    pub fn with_poll_interval(self, _poll_interval: Duration) -> Self {
         self
     }
 
@@ -104,12 +108,24 @@ impl TokioPublication {
         #[cfg(not(unix))]
         {
             loop {
-                match self.inner.send(payload) {
-                    Ok(report) => return Ok(report),
-                    Err(error) if error.is_would_block() => {
-                        tokio::time::sleep(self.poll_interval).await
+                match self.readiness.try_send(payload) {
+                    Ok(bytes_sent) => {
+                        return self
+                            .inner
+                            .finish_send(Ok(bytes_sent))
+                            .map_err(TokioSendError::Send);
                     }
-                    Err(error) => return Err(TokioSendError::Send(error)),
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => self
+                        .readiness
+                        .writable()
+                        .await
+                        .map_err(TokioSendError::Readiness)?,
+                    Err(error) => {
+                        return self
+                            .inner
+                            .finish_send(Err(error))
+                            .map_err(TokioSendError::Send);
+                    }
                 }
             }
         }

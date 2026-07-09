@@ -1,4 +1,6 @@
 #[cfg(feature = "metrics")]
+use fs2::FileExt;
+#[cfg(feature = "metrics")]
 use serde_json::{Map, Value, json};
 #[cfg(feature = "metrics")]
 use std::fs;
@@ -7,7 +9,7 @@ use std::fs::File;
 #[cfg(feature = "metrics")]
 use std::fs::OpenOptions;
 #[cfg(feature = "metrics")]
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 #[cfg(feature = "metrics")]
 use std::path::{Path, PathBuf};
 #[cfg(feature = "metrics")]
@@ -91,7 +93,10 @@ pub fn header_json(
     })
 }
 
-/// Returns the first non-empty line from a JSONL file, if any.
+/// Returns the first non-empty line from a valid canonical JSONL file, if any.
+///
+/// Existing non-empty files without a valid single header and valid sample rows
+/// are rejected rather than exposed as headerless input.
 #[cfg(feature = "metrics")]
 pub fn first_non_empty_line(path: &Path) -> Result<Option<String>, std::io::Error> {
     let file = match File::open(path) {
@@ -100,15 +105,8 @@ pub fn first_non_empty_line(path: &Path) -> Result<Option<String>, std::io::Erro
         Err(err) => return Err(err),
     };
 
-    let reader = BufReader::new(file);
-    for line in reader.lines() {
-        let line = line?;
-        if !line.trim().is_empty() {
-            return Ok(Some(line));
-        }
-    }
-
-    Ok(None)
+    validate_existing_header_reader(BufReader::new(file))
+        .map(|header| header.map(|header| header.line))
 }
 
 /// Validates the existing first non-empty JSONL line as a Heimdall header.
@@ -120,10 +118,24 @@ pub fn validate_existing_header(path: &Path) -> Result<Option<Value>, std::io::E
         Err(err) => return Err(err),
     };
 
+    validate_existing_header_reader(BufReader::new(file))
+        .map(|header| header.map(|header| header.value))
+}
+
+#[cfg(feature = "metrics")]
+struct ValidatedJsonlHeader {
+    value: Value,
+    line: String,
+}
+
+#[cfg(feature = "metrics")]
+fn validate_existing_header_reader(
+    reader: impl BufRead,
+) -> Result<Option<ValidatedJsonlHeader>, std::io::Error> {
     let mut non_empty_line_index = 0usize;
     let mut parsed_header = None;
 
-    for line in BufReader::new(file).lines() {
+    for line in reader.lines() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
@@ -143,14 +155,17 @@ pub fn validate_existing_header(path: &Path) -> Result<Option<Value>, std::io::E
         })?;
 
         if non_empty_line_index == 1 {
-            if !is_header_object(&parsed) {
-                return Err(std::io::Error::new(
+            validate_header_object(&parsed).map_err(|message| {
+                std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    "existing JSONL file does not start with a Heimdall header object",
-                ));
-            }
+                    format!("existing JSONL header is invalid: {message}"),
+                )
+            })?;
 
-            parsed_header = Some(parsed);
+            parsed_header = Some(ValidatedJsonlHeader {
+                value: parsed,
+                line,
+            });
             continue;
         }
 
@@ -183,7 +198,38 @@ pub fn ensure_single_header(path: &Path, header: &Value) -> Result<(), std::io::
 
 #[cfg(feature = "metrics")]
 fn open_jsonl_append_file(path: &Path, header: &Value) -> Result<File, std::io::Error> {
-    match validate_existing_header(path)? {
+    validate_header_object(header).map_err(|message| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("requested JSONL header is invalid: {message}"),
+        )
+    })?;
+
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(path)?;
+    file.try_lock_exclusive().map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!(
+                "failed to acquire exclusive JSONL writer lock for {}: {error}",
+                path.display()
+            ),
+        )
+    })?;
+
+    file.seek(SeekFrom::Start(0))?;
+    let existing =
+        validate_existing_header_reader(BufReader::new(&mut file))?.map(|header| header.value);
+    match existing {
         Some(existing) => {
             if !headers_are_compatible(&existing, header) {
                 return Err(std::io::Error::new(
@@ -192,20 +238,20 @@ fn open_jsonl_append_file(path: &Path, header: &Value) -> Result<File, std::io::
                 ));
             }
 
-            OpenOptions::new().create(true).append(true).open(path)
+            Ok(file)
         }
         None => {
-            if let Some(parent) = path.parent()
-                && !parent.as_os_str().is_empty()
-            {
-                fs::create_dir_all(parent)?;
-            }
-            let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-            serde_json::to_writer(&mut file, header).map_err(std::io::Error::other)?;
-            file.write_all(b"\n")?;
+            write_json_line(&mut file, header)?;
             Ok(file)
         }
     }
+}
+
+#[cfg(feature = "metrics")]
+fn write_json_line(file: &mut File, value: &Value) -> Result<(), std::io::Error> {
+    let mut line = serde_json::to_vec(value).map_err(std::io::Error::other)?;
+    line.push(b'\n');
+    file.write_all(&line)
 }
 
 /// Appends one compact sample row to a JSONL file with a canonical header.
@@ -217,9 +263,7 @@ pub fn append_jsonl_sample_row(
 ) -> Result<(), std::io::Error> {
     validate_sample_row(sample)?;
     let mut file = open_jsonl_append_file(path, header)?;
-    serde_json::to_writer(&mut file, sample).map_err(std::io::Error::other)?;
-    file.write_all(b"\n")?;
-    Ok(())
+    write_json_line(&mut file, sample)
 }
 
 #[cfg(feature = "metrics")]
@@ -234,8 +278,7 @@ impl MetricsJsonlWriter {
     /// Appends one compact sample row without rescanning the existing file.
     pub fn append_sample_row(&mut self, sample: &Value) -> Result<(), std::io::Error> {
         validate_sample_row(sample)?;
-        serde_json::to_writer(&mut self.file, sample).map_err(std::io::Error::other)?;
-        self.file.write_all(b"\n")
+        write_json_line(&mut self.file, sample)
     }
 }
 
@@ -249,17 +292,40 @@ fn headers_are_compatible(existing: &Value, expected: &Value) -> bool {
 
 #[cfg(feature = "metrics")]
 fn is_header_object(value: &Value) -> bool {
-    let schema = value.get("schema").and_then(Value::as_str);
-    let artifact_type = value.get("artifact_type").and_then(Value::as_str);
-    let node_id = value.get("node_id").and_then(Value::as_str);
-    let producer = value.get("producer").and_then(Value::as_str);
-    let flags = value.get("flags");
+    validate_header_object(value).is_ok()
+}
 
-    schema == Some(HEIMDALL_JSONL_SCHEMA)
-        && artifact_type.is_some()
-        && node_id.is_some()
-        && producer.is_some()
-        && matches!(flags, Some(Value::Object(_)))
+#[cfg(feature = "metrics")]
+fn validate_header_object(value: &Value) -> Result<(), String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "header must be a JSON object".to_string())?;
+    if object.get("schema").and_then(Value::as_str) != Some(HEIMDALL_JSONL_SCHEMA) {
+        return Err(format!("schema must be `{HEIMDALL_JSONL_SCHEMA}`"));
+    }
+
+    for field in ["artifact_type", "node_id", "producer"] {
+        if object
+            .get(field)
+            .and_then(Value::as_str)
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            return Err(format!("{field} must be a non-empty string"));
+        }
+    }
+
+    if !object
+        .get("created_at")
+        .and_then(Value::as_f64)
+        .is_some_and(f64::is_finite)
+    {
+        return Err("created_at must be a finite JSON number".to_string());
+    }
+    if !matches!(object.get("flags"), Some(Value::Object(_))) {
+        return Err("flags must be a JSON object".to_string());
+    }
+
+    Ok(())
 }
 
 #[cfg(feature = "metrics")]
@@ -280,6 +346,26 @@ fn validate_sample_row(sample: &Value) -> Result<(), std::io::Error> {
                 ),
             ));
         }
+    }
+
+    for required_number in ["ts", "interval_secs"] {
+        if !sample_object
+            .get(required_number)
+            .and_then(Value::as_f64)
+            .is_some_and(f64::is_finite)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("JSONL sample field `{required_number}` must be a finite number"),
+            ));
+        }
+    }
+
+    if sample_object["interval_secs"].as_f64().unwrap_or(-1.0) < 0.0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "JSONL sample field `interval_secs` must not be negative",
+        ));
     }
 
     Ok(())
@@ -332,6 +418,10 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(lines.len(), 3);
+        assert_eq!(
+            first_non_empty_line(&path).unwrap().as_deref(),
+            Some(lines[0])
+        );
 
         let parsed_header: Value = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(parsed_header["schema"], HEIMDALL_JSONL_SCHEMA);
@@ -366,8 +456,50 @@ mod tests {
         let err = validate_existing_header(&path).unwrap_err();
 
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            first_non_empty_line(&path).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn existing_header_without_created_at_is_rejected() {
+        let path = std::env::temp_dir().join(format!(
+            "mctx_missing_created_at_{}.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::ZERO)
+                .as_nanos()
+        ));
+        fs::write(
+            &path,
+            r#"{"schema":"heimdall-jsonl-v1","artifact_type":"mctx-network","node_id":"sender-a","producer":"mctx-core/test","flags":{}}
+"#,
+        )
+        .unwrap();
+
+        let err = validate_existing_header(&path).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn invalid_requested_header_is_rejected_before_file_creation() {
+        let path = std::env::temp_dir().join(format!(
+            "mctx_invalid_requested_header_{}.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::ZERO)
+                .as_nanos()
+        ));
+
+        let err = MetricsJsonlWriter::open(&path, &json!({"not": "a header"})).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(!path.exists());
     }
 
     #[test]
@@ -539,6 +671,36 @@ mod tests {
         assert!(!is_header_object(&serde_json::from_str(lines[1]).unwrap()));
         assert!(!is_header_object(&serde_json::from_str(lines[2]).unwrap()));
 
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn second_stateful_writer_cannot_race_the_active_writer() {
+        let path = std::env::temp_dir().join(format!(
+            "mctx_locked_writer_{}.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::ZERO)
+                .as_nanos()
+        ));
+        let header = json!({
+            "schema": HEIMDALL_JSONL_SCHEMA,
+            "artifact_type": NETWORK_ARTIFACT_TYPE,
+            "node_id": "sender-a",
+            "producer": "mctx-core/test",
+            "created_at": 1.0,
+            "flags": {"role": "sender"},
+        });
+        let writer = MetricsJsonlWriter::open(&path, &header).unwrap();
+
+        let err = MetricsJsonlWriter::open(&path, &header).unwrap_err();
+
+        assert!(matches!(
+            err.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::PermissionDenied
+        ));
+        drop(writer);
+        MetricsJsonlWriter::open(&path, &header).unwrap();
         let _ = fs::remove_file(path);
     }
 }

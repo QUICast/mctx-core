@@ -10,9 +10,8 @@ pub enum RawValidationMode {
     StrictMulticastDestination,
     /// Allow non-multicast destinations through validation.
     ///
-    /// The current Linux backend still only supports multicast destinations,
-    /// because it derives the Ethernet destination MAC directly from the
-    /// multicast group address.
+    /// Individual platform backends can still return an explicit unsupported
+    /// error when they cannot route a non-multicast raw datagram faithfully.
     AllowAnyDestination,
 }
 
@@ -20,16 +19,16 @@ pub enum RawValidationMode {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RawPublicationConfig {
     /// The expected IP family for outbound datagrams, if fixed in advance.
+    /// Otherwise it is inferred from the local bind or interface selector when
+    /// the publication is created.
     pub family: Option<PublicationAddressFamily>,
     /// The explicit egress interface selector, if set.
     pub outgoing_interface: Option<OutgoingInterface>,
     /// The local IP address used to select and validate the egress interface.
     ///
-    /// The source IP seen by receivers still comes from the supplied datagram.
-    /// On backends where the kernel rebuilds part of the IPv6 header, this
-    /// address must agree with the datagram source when both are present.
-    /// Otherwise this field only constrains which local interface/address the
-    /// kernel uses when it emits the packet.
+    /// The source IP seen by receivers comes from the supplied datagram. This
+    /// field only identifies a local egress address. A matching IPv6 source can
+    /// use the host IP stack; a distinct source requires a link-layer backend.
     pub bind_addr: Option<IpAddr>,
     /// Optional TTL or hop-limit override applied during transmit.
     pub ttl: Option<u8>,
@@ -46,7 +45,8 @@ impl Default for RawPublicationConfig {
 }
 
 impl RawPublicationConfig {
-    /// Creates a raw publication config with family inferred from each datagram.
+    /// Creates a raw publication config with family inferred from its local
+    /// bind or outgoing-interface selector.
     pub fn new() -> Self {
         Self {
             family: None,
@@ -70,6 +70,10 @@ impl RawPublicationConfig {
 
     /// Validates the configuration and returns an error if it is not usable.
     pub fn validate(&self) -> Result<(), MctxError> {
+        if self.bind_addr.is_none() && self.outgoing_interface.is_none() {
+            return Err(MctxError::RawInterfaceRequired);
+        }
+
         if let Some(bind_addr) = self.bind_addr {
             if bind_addr.is_multicast() || bind_addr.is_unspecified() {
                 return Err(MctxError::InvalidRawBindAddress);
@@ -111,6 +115,12 @@ impl RawPublicationConfig {
                         return Err(MctxError::OutgoingInterfaceFamilyMismatch);
                     }
                 }
+            }
+
+            if let Some(bind_addr) = self.bind_addr
+                && !interface_matches_ip(outgoing_interface, bind_addr)
+            {
+                return Err(MctxError::OutgoingInterfaceFamilyMismatch);
             }
         }
 
@@ -176,6 +186,17 @@ fn family_matches_ip(family: PublicationAddressFamily, ip: IpAddr) -> bool {
     )
 }
 
+fn interface_matches_ip(interface: OutgoingInterface, ip: IpAddr) -> bool {
+    matches!(
+        (interface, ip),
+        (OutgoingInterface::Ipv4Addr(_), IpAddr::V4(_))
+            | (
+                OutgoingInterface::Ipv6Addr(_) | OutgoingInterface::Ipv6Index(_),
+                IpAddr::V6(_)
+            )
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,6 +249,26 @@ mod tests {
         assert!(matches!(
             cfg.validate(),
             Err(MctxError::OutgoingInterfaceFamilyMismatch)
+        ));
+    }
+
+    #[test]
+    fn inferred_family_rejects_mismatched_bind_and_interface() {
+        let cfg = RawPublicationConfig::new()
+            .with_bind_addr(Ipv4Addr::new(10, 0, 0, 1))
+            .with_ipv6_interface_index(7);
+
+        assert!(matches!(
+            cfg.validate(),
+            Err(MctxError::OutgoingInterfaceFamilyMismatch)
+        ));
+    }
+
+    #[test]
+    fn raw_config_requires_an_egress_selector() {
+        assert!(matches!(
+            RawPublicationConfig::ipv4().validate(),
+            Err(MctxError::RawInterfaceRequired)
         ));
     }
 }

@@ -174,7 +174,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    #[ignore = "requires CAP_NET_RAW and MCTX_RAW_TEST_SOURCE_V4 set to a local Ethernet IPv4 address; validates send success/report only"]
+    #[ignore = "requires CAP_NET_RAW and MCTX_RAW_TEST_SOURCE_V4 set to a local IPv4 address; validates send success/report only"]
     fn linux_raw_ipv4_send_report_smoke_test() {
         run_raw_ipv4_send_report_smoke_test();
     }

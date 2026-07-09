@@ -13,12 +13,14 @@ struct RawSendCliArgs {
     count: u64,
     interval_ms: u64,
     source: IpAddr,
+    bind_addr: Option<IpAddr>,
     source_port: u16,
     interface: Option<IpAddr>,
     interface_index: Option<u32>,
     ttl: Option<u8>,
     loopback: bool,
     allow_any_destination: bool,
+    quiet: bool,
 }
 
 impl RawSendCliArgs {
@@ -27,7 +29,7 @@ impl RawSendCliArgs {
             IpAddr::V4(_) => RawPublicationConfig::ipv4(),
             IpAddr::V6(_) => RawPublicationConfig::ipv6(),
         }
-        .with_bind_addr(self.source);
+        .with_bind_addr(self.bind_addr.unwrap_or(self.source));
 
         if let Some(interface) = self.interface {
             config = match interface {
@@ -96,18 +98,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     let id = context.add_publication(config)?;
     let interval = Duration::from_millis(parsed.interval_ms);
 
-    for _ in 0..parsed.count {
+    for packet_index in 0..parsed.count {
         let report = context.send_raw(id, &datagram)?;
-        println!(
-            "sent {} raw bytes proto {:?} to {:?} from {:?} via ifindex {:?}",
-            report.bytes_sent,
-            report.ip_protocol,
-            report.destination_ip,
-            report.source_ip,
-            report.outgoing_interface_index
-        );
+        if !parsed.quiet {
+            println!(
+                "sent {} raw bytes proto {:?} to {:?} from {:?} via ifindex {:?}",
+                report.bytes_sent,
+                report.ip_protocol,
+                report.destination_ip,
+                report.source_ip,
+                report.outgoing_interface_index
+            );
+        }
 
-        if !interval.is_zero() {
+        if packet_index + 1 < parsed.count && !interval.is_zero() {
             thread::sleep(interval);
         }
     }
@@ -136,12 +140,14 @@ fn parse_raw_send_cli_args(args: &[String]) -> Result<RawSendCliArgs, String> {
             IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
         },
+        bind_addr: None,
         source_port: 4000,
         interface: None,
         interface_index: None,
         ttl: None,
         loopback: true,
         allow_any_destination: false,
+        quiet: false,
     };
 
     let mut index = 4;
@@ -182,6 +188,11 @@ fn parse_raw_send_cli_args(args: &[String]) -> Result<RawSendCliArgs, String> {
                 )?;
                 index += 1;
             }
+            "--bind" => {
+                index += 1;
+                parsed.bind_addr = Some(parse_ip_value(args, index, "--bind")?);
+                index += 1;
+            }
             "--interface" => {
                 index += 1;
                 parsed.interface = Some(parse_ip_value(args, index, "--interface")?);
@@ -205,6 +216,10 @@ fn parse_raw_send_cli_args(args: &[String]) -> Result<RawSendCliArgs, String> {
                 parsed.allow_any_destination = true;
                 index += 1;
             }
+            "--quiet" => {
+                parsed.quiet = true;
+                index += 1;
+            }
             unknown => return Err(format!("unknown argument: {unknown}")),
         }
     }
@@ -222,6 +237,12 @@ fn parse_raw_send_cli_args(args: &[String]) -> Result<RawSendCliArgs, String> {
         return Err("--interface must match the multicast group address family".to_string());
     }
 
+    if let Some(bind_addr) = parsed.bind_addr
+        && !same_family_ip(parsed.group, bind_addr)
+    {
+        return Err("--bind must match the multicast group address family".to_string());
+    }
+
     if parsed.interface.is_some() && parsed.interface_index.is_some() {
         return Err("--interface and --interface-index are mutually exclusive".to_string());
     }
@@ -236,7 +257,7 @@ fn parse_raw_send_cli_args(args: &[String]) -> Result<RawSendCliArgs, String> {
 fn print_usage(program: &str) {
     eprintln!("Usage:");
     eprintln!(
-        "  {program} <group> <dst_port> <payload> [count] [interval_ms] --source <ip> [--source-port <port>] [--interface <ip>] [--interface-index <idx>] [--ttl <ttl>] [--no-loopback] [--allow-any-destination]"
+        "  {program} <group> <dst_port> <payload> [count] [interval_ms] --source <ip> [--bind <local-ip>] [--source-port <port>] [--interface <ip>] [--interface-index <idx>] [--ttl <ttl>] [--no-loopback] [--allow-any-destination] [--quiet]"
     );
     eprintln!();
     eprintln!("Examples:");
@@ -258,8 +279,9 @@ fn print_usage(program: &str) {
         "  - this binary builds a complete UDP-in-IP datagram and sends it through the raw API"
     );
     eprintln!(
-        "  - --source sets the source IP encoded into the IP header and is also used as the default local bind"
+        "  - --source sets the source IP encoded into the IP header and is used as the local bind unless --bind is provided"
     );
+    eprintln!("  - --bind selects a distinct local egress address for remote-source forwarding");
     eprintln!("  - --source-port defaults to 4000");
     eprintln!("  - use --interface or --interface-index when you need to force egress selection");
     eprintln!(
@@ -513,12 +535,14 @@ mod tests {
             count: 1,
             interval_ms: 0,
             source: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20)),
+            bind_addr: None,
             source_port: 4000,
             interface: None,
             interface_index: None,
             ttl: Some(4),
             loopback: true,
             allow_any_destination: false,
+            quiet: false,
         };
 
         let config = parsed.build_config().unwrap();
@@ -526,5 +550,28 @@ mod tests {
             config.bind_addr,
             Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20)))
         );
+    }
+
+    #[test]
+    fn build_config_can_bind_locally_for_a_distinct_datagram_source() {
+        let parsed = RawSendCliArgs {
+            group: IpAddr::V6("ff3e::8000:1234".parse().unwrap()),
+            dst_port: 5000,
+            payload: "hello".to_string(),
+            count: 1,
+            interval_ms: 0,
+            source: IpAddr::V6("2001:db8::10".parse().unwrap()),
+            bind_addr: Some(IpAddr::V6(Ipv6Addr::LOCALHOST)),
+            source_port: 4000,
+            interface: Some(IpAddr::V6(Ipv6Addr::LOCALHOST)),
+            interface_index: None,
+            ttl: Some(4),
+            loopback: true,
+            allow_any_destination: false,
+            quiet: true,
+        };
+
+        let config = parsed.build_config().unwrap();
+        assert_eq!(config.bind_addr, Some(IpAddr::V6(Ipv6Addr::LOCALHOST)));
     }
 }

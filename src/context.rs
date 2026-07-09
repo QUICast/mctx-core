@@ -1,5 +1,5 @@
 #[cfg(feature = "metrics")]
-use crate::metrics::ContextMetricsSnapshot;
+use crate::metrics::{ContextMetricsSnapshot, MetricsSequence};
 use crate::{MctxError, Publication, PublicationConfig, PublicationId, SendReport};
 use socket2::Socket;
 use std::net::UdpSocket;
@@ -11,6 +11,7 @@ use std::time::SystemTime;
 #[cfg(feature = "metrics")]
 #[derive(Debug, Default)]
 struct ContextMetricsInner {
+    sequence: MetricsSequence,
     publications_added: AtomicU64,
     publications_removed: AtomicU64,
     total_send_calls: AtomicU64,
@@ -37,6 +38,7 @@ impl Default for Context {
 impl Context {
     #[cfg(feature = "metrics")]
     fn record_send_success(&self, bytes_sent: usize) {
+        let _update = self.metrics.sequence.write();
         self.metrics.total_send_calls.fetch_add(1, Relaxed);
         self.metrics.total_packets_sent.fetch_add(1, Relaxed);
         self.metrics
@@ -46,6 +48,7 @@ impl Context {
 
     #[cfg(feature = "metrics")]
     fn record_send_error(&self) {
+        let _update = self.metrics.sequence.write();
         self.metrics.total_send_calls.fetch_add(1, Relaxed);
         self.metrics.total_send_errors.fetch_add(1, Relaxed);
     }
@@ -70,7 +73,10 @@ impl Context {
         self.publications.push(publication);
 
         #[cfg(feature = "metrics")]
-        self.metrics.publications_added.fetch_add(1, Relaxed);
+        {
+            let _update = self.metrics.sequence.write();
+            self.metrics.publications_added.fetch_add(1, Relaxed);
+        }
 
         id
     }
@@ -79,7 +85,10 @@ impl Context {
         let publication = self.publications.swap_remove(index);
 
         #[cfg(feature = "metrics")]
-        self.metrics.publications_removed.fetch_add(1, Relaxed);
+        {
+            let _update = self.metrics.sequence.write();
+            self.metrics.publications_removed.fetch_add(1, Relaxed);
+        }
 
         publication
     }
@@ -240,14 +249,32 @@ impl Context {
     /// and they do not decrease when a publication is removed.
     #[cfg(feature = "metrics")]
     pub fn metrics_snapshot(&self) -> ContextMetricsSnapshot {
+        let (
+            publications_added,
+            publications_removed,
+            total_send_calls,
+            total_packets_sent,
+            total_bytes_sent,
+            total_send_errors,
+        ) = self.metrics.sequence.read_consistent(|| {
+            (
+                self.metrics.publications_added.load(Relaxed),
+                self.metrics.publications_removed.load(Relaxed),
+                self.metrics.total_send_calls.load(Relaxed),
+                self.metrics.total_packets_sent.load(Relaxed),
+                self.metrics.total_bytes_sent.load(Relaxed),
+                self.metrics.total_send_errors.load(Relaxed),
+            )
+        });
+
         ContextMetricsSnapshot {
-            publications_added: self.metrics.publications_added.load(Relaxed),
-            publications_removed: self.metrics.publications_removed.load(Relaxed),
+            publications_added,
+            publications_removed,
             active_publications: self.publications.len(),
-            total_send_calls: self.metrics.total_send_calls.load(Relaxed),
-            total_packets_sent: self.metrics.total_packets_sent.load(Relaxed),
-            total_bytes_sent: self.metrics.total_bytes_sent.load(Relaxed),
-            total_send_errors: self.metrics.total_send_errors.load(Relaxed),
+            total_send_calls,
+            total_packets_sent,
+            total_bytes_sent,
+            total_send_errors,
             captured_at: SystemTime::now(),
         }
     }

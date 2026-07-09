@@ -1,7 +1,7 @@
 # mctx-core-py
 
 `mctx-core-py` is the Python binding crate for
-[`mctx-core`](../README.md).
+[`mctx-core`](https://github.com/QUICast/mctx-core).
 
 It provides:
 
@@ -28,6 +28,8 @@ maturin develop
 ## Example
 
 ```python
+import asyncio
+
 from mctx_core import AsyncPublication, Context
 
 ctx = Context()
@@ -38,11 +40,15 @@ publication = ctx.add_publication(
     interface="::1",
 )
 
-report = publication.send(b"hello multicast")
-print(report.source_addr, report.destination, report.bytes_sent)
+async def main() -> None:
+    report = publication.send(b"hello multicast")
+    print(report.source_addr, report.destination, report.bytes_sent)
 
-async_publication = AsyncPublication(publication)
-report = await async_publication.send(b"hello again")
+    async_publication = AsyncPublication(publication)
+    report = await async_publication.send(b"hello again")
+    print(report.bytes_sent)
+
+asyncio.run(main())
 ```
 
 `AsyncPublication` retries a non-blocking send when the socket reports

@@ -1,5 +1,5 @@
 #[cfg(feature = "metrics")]
-use crate::metrics::PublicationMetricsSnapshot;
+use crate::metrics::{MetricsSequence, PublicationMetricsSnapshot};
 use crate::platform::resolve_ipv6_interface_index;
 use crate::{
     MctxError, SendReport,
@@ -145,7 +145,14 @@ impl Publication {
 
     /// Sends one payload.
     pub fn send(&self, payload: &[u8]) -> Result<SendReport, MctxError> {
-        match self.socket.send(payload) {
+        self.finish_send(self.socket.send(payload))
+    }
+
+    pub(crate) fn finish_send(
+        &self,
+        result: Result<usize, std::io::Error>,
+    ) -> Result<SendReport, MctxError> {
+        match result {
             Ok(bytes_sent) => {
                 #[cfg(feature = "metrics")]
                 self.metrics.record_success(bytes_sent);
@@ -306,6 +313,7 @@ impl Publication {
         let interface_addr = Self::interface_addr_v6(config);
         let explicit_interface_index = Self::explicit_interface_index_v6(config, interface_addr)?;
         let source_interface_index = match explicit_source {
+            Some(source) if interface_addr == Some(source) => explicit_interface_index,
             Some(source) if source.is_unicast_link_local() => match explicit_interface_index {
                 Some(interface_index) => Some(interface_index),
                 None => Some(resolve_ipv6_interface_index(source)?),
@@ -384,8 +392,11 @@ impl Publication {
                     return Err(MctxError::ExistingSocketAddressFamilyMismatch);
                 }
 
+                if Self::is_unbound_local_addr(SocketAddr::V4(local_v4)) {
+                    return Ok(());
+                }
+
                 if let Some(IpAddr::V4(expected)) = config.source_addr
-                    && local_v4.ip() != &Ipv4Addr::UNSPECIFIED
                     && local_v4.ip() != &expected
                 {
                     return Err(MctxError::ExistingSocketAddressMismatch {
@@ -395,7 +406,6 @@ impl Publication {
                 }
 
                 if let Some(expected) = config.source_port
-                    && local_v4.port() != 0
                     && local_v4.port() != expected
                 {
                     return Err(MctxError::ExistingSocketPortMismatch {
@@ -411,8 +421,11 @@ impl Publication {
                     return Err(MctxError::ExistingSocketAddressFamilyMismatch);
                 }
 
+                if Self::is_unbound_local_addr(SocketAddr::V6(local_v6)) {
+                    return Ok(());
+                }
+
                 if let Some(IpAddr::V6(expected)) = config.source_addr
-                    && local_v6.ip() != &Ipv6Addr::UNSPECIFIED
                     && local_v6.ip() != &expected
                 {
                     return Err(MctxError::ExistingSocketAddressMismatch {
@@ -422,7 +435,6 @@ impl Publication {
                 }
 
                 if let Some(expected) = config.source_port
-                    && local_v6.port() != 0
                     && local_v6.port() != expected
                 {
                     return Err(MctxError::ExistingSocketPortMismatch {
@@ -440,7 +452,19 @@ impl Publication {
     fn bind_if_needed(socket: &Socket, bind_addr: SocketAddr) -> Result<(), MctxError> {
         let needs_bind = match socket.local_addr() {
             Ok(local_addr) => match local_addr.as_socket() {
-                Some(local_addr) => local_addr != bind_addr,
+                Some(local_addr) if Self::is_unbound_local_addr(local_addr) => true,
+                Some(local_addr) => {
+                    if Self::matches_bind_constraints(local_addr, bind_addr) {
+                        false
+                    } else {
+                        return Err(MctxError::SocketBindFailed(std::io::Error::new(
+                            std::io::ErrorKind::AddrInUse,
+                            format!(
+                                "existing socket local address {local_addr} does not satisfy requested bind constraints {bind_addr}"
+                            ),
+                        )));
+                    }
+                }
                 None => return Err(MctxError::ExistingSocketAddressFamilyMismatch),
             },
             Err(_) => true,
@@ -453,6 +477,25 @@ impl Publication {
         }
 
         Ok(())
+    }
+
+    fn is_unbound_local_addr(addr: SocketAddr) -> bool {
+        addr.port() == 0 && addr.ip().is_unspecified()
+    }
+
+    fn matches_bind_constraints(local: SocketAddr, requested: SocketAddr) -> bool {
+        match (local, requested) {
+            (SocketAddr::V4(local), SocketAddr::V4(requested)) => {
+                (requested.ip().is_unspecified() || requested.ip() == local.ip())
+                    && (requested.port() == 0 || requested.port() == local.port())
+            }
+            (SocketAddr::V6(local), SocketAddr::V6(requested)) => {
+                (requested.ip().is_unspecified() || requested.ip() == local.ip())
+                    && (requested.port() == 0 || requested.port() == local.port())
+                    && (requested.scope_id() == 0 || requested.scope_id() == local.scope_id())
+            }
+            _ => false,
+        }
     }
 
     fn bind_addr_v4(config: &PublicationConfig) -> Option<SocketAddrV4> {
@@ -549,6 +592,7 @@ impl AsRawSocket for Publication {
 #[cfg(feature = "metrics")]
 #[derive(Debug, Default)]
 struct PublicationMetricsState {
+    sequence: MetricsSequence,
     send_calls: std::sync::atomic::AtomicU64,
     packets_sent: std::sync::atomic::AtomicU64,
     bytes_sent: std::sync::atomic::AtomicU64,
@@ -560,6 +604,7 @@ impl PublicationMetricsState {
     fn record_success(&self, bytes_sent: usize) {
         use std::sync::atomic::Ordering::Relaxed;
 
+        let _update = self.sequence.write();
         self.send_calls.fetch_add(1, Relaxed);
         self.packets_sent.fetch_add(1, Relaxed);
         self.bytes_sent.fetch_add(bytes_sent as u64, Relaxed);
@@ -568,6 +613,7 @@ impl PublicationMetricsState {
     fn record_error(&self) {
         use std::sync::atomic::Ordering::Relaxed;
 
+        let _update = self.sequence.write();
         self.send_calls.fetch_add(1, Relaxed);
         self.send_errors.fetch_add(1, Relaxed);
     }
@@ -575,11 +621,21 @@ impl PublicationMetricsState {
     fn snapshot(&self) -> PublicationMetricsSnapshot {
         use std::sync::atomic::Ordering::Relaxed;
 
+        let (send_calls, packets_sent, bytes_sent, send_errors) =
+            self.sequence.read_consistent(|| {
+                (
+                    self.send_calls.load(Relaxed),
+                    self.packets_sent.load(Relaxed),
+                    self.bytes_sent.load(Relaxed),
+                    self.send_errors.load(Relaxed),
+                )
+            });
+
         PublicationMetricsSnapshot {
-            send_calls: self.send_calls.load(Relaxed),
-            packets_sent: self.packets_sent.load(Relaxed),
-            bytes_sent: self.bytes_sent.load(Relaxed),
-            send_errors: self.send_errors.load(Relaxed),
+            send_calls,
+            packets_sent,
+            bytes_sent,
+            send_errors,
             captured_at: SystemTime::now(),
         }
     }
@@ -701,6 +757,39 @@ mod tests {
         assert_eq!(delta.send_errors, 0);
     }
 
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn publication_metrics_snapshots_remain_coherent_during_concurrent_updates() {
+        use std::sync::Arc;
+
+        let metrics = Arc::new(PublicationMetricsState::default());
+        let workers = (0..4)
+            .map(|_| {
+                let metrics = Arc::clone(&metrics);
+                std::thread::spawn(move || {
+                    for _ in 0..2_000 {
+                        metrics.record_success(7);
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for _ in 0..2_000 {
+            let snapshot = metrics.snapshot();
+            assert_eq!(snapshot.send_calls, snapshot.packets_sent);
+            assert_eq!(snapshot.bytes_sent, snapshot.packets_sent * 7);
+            assert_eq!(snapshot.send_errors, 0);
+        }
+
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.send_calls, 8_000);
+        assert_eq!(snapshot.packets_sent, 8_000);
+        assert_eq!(snapshot.bytes_sent, 56_000);
+    }
+
     #[test]
     fn existing_socket_source_addr_mismatch_is_rejected() {
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
@@ -723,5 +812,41 @@ mod tests {
                 if expected == IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))
                     && actual == IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))
         ));
+    }
+
+    #[test]
+    fn existing_bound_socket_accepts_matching_source_without_explicit_port() {
+        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
+        socket
+            .bind(&SockAddr::from(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)))
+            .unwrap();
+        let existing = socket.local_addr().unwrap().as_socket().unwrap();
+
+        let publication = Publication::new_with_socket(
+            PublicationId(1),
+            PublicationConfig::new(TEST_GROUP, 5000).with_source_addr(Ipv4Addr::LOCALHOST),
+            socket,
+        )
+        .unwrap();
+
+        assert_eq!(publication.local_addr().unwrap(), existing);
+    }
+
+    #[test]
+    fn existing_bound_socket_accepts_matching_port_without_explicit_source() {
+        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
+        socket
+            .bind(&SockAddr::from(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)))
+            .unwrap();
+        let existing = socket.local_addr().unwrap().as_socket().unwrap();
+
+        let publication = Publication::new_with_socket(
+            PublicationId(1),
+            PublicationConfig::new(TEST_GROUP, 5000).with_source_port(existing.port()),
+            socket,
+        )
+        .unwrap();
+
+        assert_eq!(publication.local_addr().unwrap(), existing);
     }
 }

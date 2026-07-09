@@ -232,7 +232,8 @@ fn same_family_ip(left: IpAddr, right: IpAddr) -> bool {
 
 /// Returns `true` if the group is in `ff3x::/32`.
 pub fn is_ipv6_ssm_group(group: Ipv6Addr) -> bool {
-    group.is_multicast() && (group.octets()[1] & 0xf0) == 0x30
+    let octets = group.octets();
+    group.is_multicast() && (octets[1] & 0xf0) == 0x30 && octets[2] == 0 && octets[3] == 0
 }
 
 pub(crate) fn ipv6_multicast_scope(group: Ipv6Addr) -> Option<Ipv6MulticastScope> {
@@ -394,6 +395,7 @@ mod tests {
         assert!(is_ipv6_ssm_group("ff31::8000:1234".parse().unwrap()));
         assert!(is_ipv6_ssm_group("ff3e::8000:1234".parse().unwrap()));
         assert!(!is_ipv6_ssm_group("ff12::1234".parse().unwrap()));
+        assert!(!is_ipv6_ssm_group("ff31:1234::1".parse().unwrap()));
     }
 
     #[test]

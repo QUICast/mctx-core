@@ -90,10 +90,16 @@ observed sender IP, so `source=` is usually the most important knob.
 For direct await-style use:
 
 ```python
+import asyncio
+
 from mctx_core import AsyncPublication
 
-async_publication = AsyncPublication(publication)
-report = await async_publication.send(b"hello from asyncio")
+async def main() -> None:
+    async_publication = AsyncPublication(publication)
+    report = await async_publication.send(b"hello from asyncio")
+    print(report.bytes_sent)
+
+asyncio.run(main())
 ```
 
 ### Event Loop Behavior

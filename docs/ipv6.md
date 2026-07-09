@@ -39,20 +39,24 @@ If you provide only an interface index:
 Use `ff3x::/32` groups for IPv6 SSM-oriented testing. The `x` nibble is the
 multicast scope:
 
-- `ff31::/16` for interface-local tests on one host
-- `ff32::/16` for link-local tests on one L2 link
-- `ff35::/16` for site-local tests
-- `ff38::/16` for organization-local tests
-- `ff3e::/16` for global scope
+- `ff31::/32` for interface-local tests on one host
+- `ff32::/32` for link-local tests on one L2 link
+- `ff35::/32` for site-local tests
+- `ff38::/32` for organization-local tests
+- `ff3e::/32` for global scope
 
 Prefer dynamic group IDs such as `ff31::8000:1234` or `ff3e::8000:1234`.
+The wider `ff31::/16`, `ff32::/16`, and similar ranges describe multicast
+scope, but only addresses whose next 16 bits are zero are inside the
+corresponding SSM `/32` prefix.
 
 Do not treat `ff12::...` as an IPv6 SSM group. That is ASM.
 
 ## Practical Rules
 
-- For `ff31::/16`, same-host tests with `::1` are a good first smoke test.
-- For `ff32::/16`, send from a link-local `fe80::...` source.
+- For the `ff31::/16` scope, same-host tests with an SSM group such as
+  `ff31::8000:1234` and source `::1` are a good first smoke test.
+- For the `ff32::/16` scope, send from a link-local `fe80::...` source.
 - For wider scopes such as `ff35::/16`, `ff38::/16`, or `ff3e::/16`, use a
   ULA or global IPv6 source valid on that network.
 - The configured source address must match the actual packet source the

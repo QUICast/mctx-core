@@ -1,5 +1,62 @@
 use crate::{Context, Publication};
-use std::time::SystemTime;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime};
+
+#[derive(Debug, Default)]
+pub(crate) struct MetricsSequence {
+    value: AtomicU64,
+}
+
+pub(crate) struct MetricsWriteGuard<'a> {
+    sequence: &'a MetricsSequence,
+}
+
+impl MetricsSequence {
+    pub(crate) fn write(&self) -> MetricsWriteGuard<'_> {
+        let mut current = self.value.load(Ordering::Relaxed);
+        loop {
+            if current % 2 == 1 {
+                std::hint::spin_loop();
+                current = self.value.load(Ordering::Relaxed);
+                continue;
+            }
+
+            match self.value.compare_exchange_weak(
+                current,
+                current.wrapping_add(1),
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return MetricsWriteGuard { sequence: self },
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    pub(crate) fn read_consistent<T>(&self, read: impl Fn() -> T) -> T {
+        loop {
+            let before = self.value.load(Ordering::Acquire);
+            if before % 2 == 1 {
+                std::hint::spin_loop();
+                continue;
+            }
+
+            let snapshot = read();
+            // Keep all counter reads between the two sequence observations.
+            std::sync::atomic::fence(Ordering::AcqRel);
+            let after = self.value.load(Ordering::Relaxed);
+            if before == after {
+                return snapshot;
+            }
+        }
+    }
+}
+
+impl Drop for MetricsWriteGuard<'_> {
+    fn drop(&mut self) {
+        self.sequence.value.fetch_add(1, Ordering::Release);
+    }
+}
 
 fn rate_per_sec(count: u64, interval_secs: f64) -> f64 {
     if interval_secs > 0.0 {
@@ -43,10 +100,17 @@ impl PublicationMetricsSnapshot {
     /// - any cumulative counter appears to have moved backwards
     pub fn delta_since(&self, earlier: &Self) -> Option<PublicationMetricsDelta> {
         let duration = self.captured_at.duration_since(earlier.captured_at).ok()?;
-        let interval_secs = duration.as_secs_f64();
+        self.delta_since_duration(earlier, duration)
+    }
 
+    /// Computes counter deltas using a caller-supplied monotonic interval.
+    pub fn delta_since_duration(
+        &self,
+        earlier: &Self,
+        duration: Duration,
+    ) -> Option<PublicationMetricsDelta> {
         Some(PublicationMetricsDelta {
-            interval_secs,
+            interval_secs: duration.as_secs_f64(),
             send_calls: self.send_calls.checked_sub(earlier.send_calls)?,
             packets_sent: self.packets_sent.checked_sub(earlier.packets_sent)?,
             bytes_sent: self.bytes_sent.checked_sub(earlier.bytes_sent)?,
@@ -82,6 +146,7 @@ impl PublicationMetricsDelta {
 pub struct PublicationMetricsSampler<'a> {
     publication: &'a Publication,
     previous: Option<PublicationMetricsSnapshot>,
+    previous_sampled_at: Option<Instant>,
 }
 
 impl<'a> PublicationMetricsSampler<'a> {
@@ -89,6 +154,7 @@ impl<'a> PublicationMetricsSampler<'a> {
         Self {
             publication,
             previous: None,
+            previous_sampled_at: None,
         }
     }
 
@@ -98,24 +164,47 @@ impl<'a> PublicationMetricsSampler<'a> {
 
     pub fn sample(&mut self) -> Option<PublicationMetricsDelta> {
         let current = self.snapshot();
-        self.sample_snapshot(current)
+        self.sample_snapshot_at(current, Instant::now())
     }
 
+    /// Computes a delta from a caller-supplied snapshot using its wall-clock
+    /// `captured_at` timestamp. This clears the monotonic baseline used by
+    /// `sample()` and `sample_snapshot_at()`.
     pub fn sample_snapshot(
         &mut self,
         current: PublicationMetricsSnapshot,
     ) -> Option<PublicationMetricsDelta> {
-        let delta = match &self.previous {
-            Some(previous) => current.delta_since(previous),
-            None => None,
-        };
-
+        let delta = self
+            .previous
+            .as_ref()
+            .and_then(|previous| current.delta_since(previous));
         self.previous = Some(current);
+        self.previous_sampled_at = None;
+        delta
+    }
+
+    /// Computes a delta from a caller-supplied snapshot and monotonic capture
+    /// instant. The first call after `sample_snapshot()` establishes a new
+    /// monotonic baseline and returns `None`.
+    pub fn sample_snapshot_at(
+        &mut self,
+        current: PublicationMetricsSnapshot,
+        sampled_at: Instant,
+    ) -> Option<PublicationMetricsDelta> {
+        let delta = match (&self.previous, self.previous_sampled_at) {
+            (Some(previous), Some(previous_sampled_at)) => sampled_at
+                .checked_duration_since(previous_sampled_at)
+                .and_then(|duration| current.delta_since_duration(previous, duration)),
+            _ => None,
+        };
+        self.previous = Some(current);
+        self.previous_sampled_at = Some(sampled_at);
         delta
     }
 
     pub fn reset(&mut self) {
         self.previous = None;
+        self.previous_sampled_at = None;
     }
 
     pub fn previous(&self) -> Option<&PublicationMetricsSnapshot> {
@@ -178,10 +267,17 @@ impl ContextMetricsSnapshot {
     /// should be read directly from the latest snapshot instead.
     pub fn delta_since(&self, earlier: &Self) -> Option<ContextMetricsDelta> {
         let duration = self.captured_at.duration_since(earlier.captured_at).ok()?;
-        let interval_secs = duration.as_secs_f64();
+        self.delta_since_duration(earlier, duration)
+    }
 
+    /// Computes counter deltas using a caller-supplied monotonic interval.
+    pub fn delta_since_duration(
+        &self,
+        earlier: &Self,
+        duration: Duration,
+    ) -> Option<ContextMetricsDelta> {
         Some(ContextMetricsDelta {
-            interval_secs,
+            interval_secs: duration.as_secs_f64(),
             publications_added: self
                 .publications_added
                 .checked_sub(earlier.publications_added)?,
@@ -231,6 +327,7 @@ impl ContextMetricsDelta {
 pub struct ContextMetricsSampler<'a> {
     context: &'a Context,
     previous: Option<ContextMetricsSnapshot>,
+    previous_sampled_at: Option<Instant>,
 }
 
 impl<'a> ContextMetricsSampler<'a> {
@@ -238,6 +335,7 @@ impl<'a> ContextMetricsSampler<'a> {
         Self {
             context,
             previous: None,
+            previous_sampled_at: None,
         }
     }
 
@@ -247,24 +345,47 @@ impl<'a> ContextMetricsSampler<'a> {
 
     pub fn sample(&mut self) -> Option<ContextMetricsDelta> {
         let current = self.snapshot();
-        self.sample_snapshot(current)
+        self.sample_snapshot_at(current, Instant::now())
     }
 
+    /// Computes a delta from a caller-supplied snapshot using its wall-clock
+    /// `captured_at` timestamp. This clears the monotonic baseline used by
+    /// `sample()` and `sample_snapshot_at()`.
     pub fn sample_snapshot(
         &mut self,
         current: ContextMetricsSnapshot,
     ) -> Option<ContextMetricsDelta> {
-        let delta = match &self.previous {
-            Some(previous) => current.delta_since(previous),
-            None => None,
-        };
-
+        let delta = self
+            .previous
+            .as_ref()
+            .and_then(|previous| current.delta_since(previous));
         self.previous = Some(current);
+        self.previous_sampled_at = None;
+        delta
+    }
+
+    /// Computes a delta from a caller-supplied snapshot and monotonic capture
+    /// instant. The first call after `sample_snapshot()` establishes a new
+    /// monotonic baseline and returns `None`.
+    pub fn sample_snapshot_at(
+        &mut self,
+        current: ContextMetricsSnapshot,
+        sampled_at: Instant,
+    ) -> Option<ContextMetricsDelta> {
+        let delta = match (&self.previous, self.previous_sampled_at) {
+            (Some(previous), Some(previous_sampled_at)) => sampled_at
+                .checked_duration_since(previous_sampled_at)
+                .and_then(|duration| current.delta_since_duration(previous, duration)),
+            _ => None,
+        };
+        self.previous = Some(current);
+        self.previous_sampled_at = Some(sampled_at);
         delta
     }
 
     pub fn reset(&mut self) {
         self.previous = None;
+        self.previous_sampled_at = None;
     }
 
     pub fn previous(&self) -> Option<&ContextMetricsSnapshot> {
@@ -356,5 +477,67 @@ mod tests {
         assert_eq!(delta.packets_per_sec(), 0.5);
         assert_eq!(delta.bytes_per_sec(), 80.0);
         assert_eq!(delta.send_errors_per_sec(), 0.25);
+    }
+
+    #[test]
+    fn context_sampler_uses_monotonic_interval_when_wall_clock_moves_backwards() {
+        let context = Context::new();
+        let mut sampler = ContextMetricsSampler::new(&context);
+        let sampled_at = Instant::now();
+        let earlier = ContextMetricsSnapshot {
+            publications_added: 1,
+            publications_removed: 0,
+            active_publications: 1,
+            total_send_calls: 1,
+            total_packets_sent: 1,
+            total_bytes_sent: 10,
+            total_send_errors: 0,
+            captured_at: SystemTime::UNIX_EPOCH + Duration::from_secs(10),
+        };
+        let later = ContextMetricsSnapshot {
+            total_send_calls: 2,
+            total_packets_sent: 2,
+            total_bytes_sent: 20,
+            captured_at: SystemTime::UNIX_EPOCH + Duration::from_secs(5),
+            ..earlier.clone()
+        };
+
+        assert!(sampler.sample_snapshot_at(earlier, sampled_at).is_none());
+        let delta = sampler
+            .sample_snapshot_at(later, sampled_at + Duration::from_secs(2))
+            .unwrap();
+
+        assert_eq!(delta.interval_secs, 2.0);
+        assert_eq!(delta.packets_sent, 1);
+        assert_eq!(delta.bytes_sent, 10);
+    }
+
+    #[test]
+    fn context_sampler_uses_supplied_snapshot_timestamps() {
+        let context = Context::new();
+        let mut sampler = ContextMetricsSampler::new(&context);
+        let earlier = ContextMetricsSnapshot {
+            publications_added: 1,
+            publications_removed: 0,
+            active_publications: 1,
+            total_send_calls: 1,
+            total_packets_sent: 1,
+            total_bytes_sent: 10,
+            total_send_errors: 0,
+            captured_at: SystemTime::UNIX_EPOCH + Duration::from_secs(10),
+        };
+        let later = ContextMetricsSnapshot {
+            total_send_calls: 2,
+            total_packets_sent: 2,
+            total_bytes_sent: 20,
+            captured_at: SystemTime::UNIX_EPOCH + Duration::from_secs(15),
+            ..earlier.clone()
+        };
+
+        assert!(sampler.sample_snapshot(earlier).is_none());
+        let delta = sampler.sample_snapshot(later).unwrap();
+
+        assert_eq!(delta.interval_secs, 5.0);
+        assert_eq!(delta.packets_sent, 1);
     }
 }

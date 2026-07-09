@@ -3,6 +3,12 @@ use crate::MctxError;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 
+#[cfg(windows)]
+fn aligned_ffi_buffer<T>(byte_len: u32) -> Vec<std::mem::MaybeUninit<T>> {
+    let element_count = (byte_len as usize).div_ceil(std::mem::size_of::<T>());
+    Vec::with_capacity(element_count)
+}
+
 #[cfg(all(unix, feature = "raw-packets"))]
 pub(crate) fn resolve_ipv4_interface_index(interface: Ipv4Addr) -> Result<u32, MctxError> {
     fn ambiguous_interface_error(interface: Ipv4Addr, first: u32, second: u32) -> MctxError {
@@ -133,13 +139,15 @@ pub(crate) fn resolve_ipv4_interface_index(interface: Ipv4Addr) -> Result<u32, M
     let mut buf_len = INITIAL_BUFFER_SIZE as u32;
 
     loop {
-        let mut buffer = vec![0u8; buf_len as usize];
+        // GetAdaptersAddresses writes typed linked structures into this buffer,
+        // so its base pointer must satisfy the structure's alignment.
+        let mut buffer = aligned_ffi_buffer::<IP_ADAPTER_ADDRESSES_LH>(buf_len);
         let result = unsafe {
             GetAdaptersAddresses(
                 AF_UNSPEC as u32,
                 0,
                 std::ptr::null_mut(),
-                buffer.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>(),
+                buffer.as_mut_ptr().cast(),
                 &mut buf_len,
             )
         };
@@ -217,13 +225,15 @@ pub(crate) fn resolve_ipv6_interface_index(interface: Ipv6Addr) -> Result<u32, M
     let mut buf_len = INITIAL_BUFFER_SIZE as u32;
 
     loop {
-        let mut buffer = vec![0u8; buf_len as usize];
+        // GetAdaptersAddresses writes typed linked structures into this buffer,
+        // so its base pointer must satisfy the structure's alignment.
+        let mut buffer = aligned_ffi_buffer::<IP_ADAPTER_ADDRESSES_LH>(buf_len);
         let result = unsafe {
             GetAdaptersAddresses(
                 AF_UNSPEC as u32,
                 0,
                 std::ptr::null_mut(),
-                buffer.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>(),
+                buffer.as_mut_ptr().cast(),
                 &mut buf_len,
             )
         };

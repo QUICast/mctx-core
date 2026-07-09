@@ -51,5 +51,5 @@ The base crate keeps only the essentials:
 - `thiserror`
 - lightweight OS support for IPv6 interface resolution
 
-Async support and metrics are gated behind features so lightweight embeddings do
-not pay for them by default.
+Async support, metrics, and raw packet transmit are gated behind features so
+lightweight embeddings do not pay for them by default.

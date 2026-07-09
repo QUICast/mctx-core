@@ -41,7 +41,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let interval = Duration::from_millis(parsed.interval_ms);
 
     #[cfg(feature = "metrics")]
-    let summary_interval = summary_interval_from_env();
+    let summary_interval = summary_interval_from_env()?;
     #[cfg(feature = "metrics")]
     let summary_output = summary_output_from_env(&parsed, &config)?;
     #[cfg(feature = "metrics")]
@@ -51,15 +51,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     #[cfg(feature = "metrics")]
     let mut metrics_writer: Option<MetricsJsonlWriter> = None;
     #[cfg(feature = "metrics")]
-    let mut next_summary_at =
-        summary_interval.map(|summary_interval| Instant::now() + summary_interval);
+    let mut next_summary_at = summary_interval.map(next_summary_deadline).transpose()?;
 
-    for _ in 0..parsed.count {
+    for packet_index in 0..parsed.count {
         let report = context.send(id, parsed.payload.as_bytes())?;
-        println!(
-            "sent {} bytes to {} from {:?}",
-            report.bytes_sent, report.destination, report.source_addr
-        );
+        if !parsed.quiet {
+            println!(
+                "sent {} bytes to {} from {:?}",
+                report.bytes_sent, report.destination, report.source_addr
+            );
+        }
 
         #[cfg(feature = "metrics")]
         if let (Some(summary_interval), Some(deadline)) = (summary_interval, next_summary_at)
@@ -71,10 +72,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 summary_output.as_ref(),
                 &mut metrics_writer,
             )?;
-            next_summary_at = Some(Instant::now() + summary_interval);
+            next_summary_at = Some(next_summary_deadline(summary_interval)?);
         }
 
-        if !interval.is_zero() {
+        if packet_index + 1 < parsed.count && !interval.is_zero() {
             thread::sleep(interval);
         }
     }
@@ -93,14 +94,40 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 #[cfg(feature = "metrics")]
-fn summary_interval_from_env() -> Option<Duration> {
-    let raw = env::var("MCTX_METRICS_SUMMARY_SECS").ok()?;
-    let secs = raw.parse::<u64>().ok()?;
-    if secs == 0 {
-        None
-    } else {
-        Some(Duration::from_secs(secs))
+fn summary_interval_from_env() -> Result<Option<Duration>, String> {
+    let raw = match env::var("MCTX_METRICS_SUMMARY_SECS") {
+        Ok(raw) => raw,
+        Err(env::VarError::NotPresent) => return Ok(None),
+        Err(error) => return Err(format!("MCTX_METRICS_SUMMARY_SECS is invalid: {error}")),
+    };
+    parse_summary_interval(&raw)
+}
+
+#[cfg(feature = "metrics")]
+fn parse_summary_interval(raw: &str) -> Result<Option<Duration>, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
     }
+
+    let secs = raw
+        .parse::<u64>()
+        .map_err(|error| format!("MCTX_METRICS_SUMMARY_SECS must be an integer: {error}"))?;
+    if secs == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(Duration::from_secs(secs)))
+    }
+}
+
+#[cfg(feature = "metrics")]
+fn next_summary_deadline(interval: Duration) -> Result<Instant, std::io::Error> {
+    Instant::now().checked_add(interval).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "MCTX_METRICS_SUMMARY_SECS is too large for the platform clock",
+        )
+    })
 }
 
 #[cfg(feature = "metrics")]
@@ -246,7 +273,7 @@ fn emit_metrics_summary(
     writer: &mut Option<MetricsJsonlWriter>,
 ) -> Result<(), Box<dyn Error>> {
     let snapshot = context.metrics_snapshot();
-    if let Some(delta) = metrics_sampler.sample_snapshot(snapshot.clone()) {
+    if let Some(delta) = metrics_sampler.sample_snapshot_at(snapshot.clone(), Instant::now()) {
         if let Some(output) = output {
             write_metrics_summary_jsonl(&snapshot, &delta, output, writer)?;
         } else {
@@ -299,7 +326,7 @@ fn write_metrics_summary_jsonl(
 
     writer
         .as_mut()
-        .expect("metrics writer is initialized before append")
+        .ok_or_else(|| std::io::Error::other("metrics writer was not initialized"))?
         .append_sample_row(&sample)
 }
 
@@ -366,6 +393,17 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     #[test]
+    fn metrics_summary_interval_parsing_is_explicit() {
+        assert_eq!(parse_summary_interval("").unwrap(), None);
+        assert_eq!(parse_summary_interval("0").unwrap(), None);
+        assert_eq!(
+            parse_summary_interval(" 2 ").unwrap(),
+            Some(Duration::from_secs(2))
+        );
+        assert!(parse_summary_interval("soon").is_err());
+    }
+
+    #[test]
     fn sender_metrics_jsonl_uses_single_header_and_compact_samples() {
         let parent_name = format!(
             "mctx_send_metrics_node_{}",
@@ -391,6 +429,7 @@ mod tests {
             interface_index: None,
             ttl: Some(4),
             loopback: true,
+            quiet: false,
         };
         let config = parsed.build_config().unwrap();
         let output = MetricsJsonlOutputConfig {

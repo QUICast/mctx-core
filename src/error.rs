@@ -133,7 +133,11 @@ pub enum MctxError {
     #[error("MCTX: raw datagram destination must be multicast")]
     InvalidRawMulticastDestination,
 
-    /// The supplied raw datagram source conflicts with the configured bind address.
+    /// Compatibility variant for the former local-source-only IPv6 raw path.
+    ///
+    /// Current backends no longer emit this error: Linux uses link-layer
+    /// injection for remote IPv6 sources, while unsupported platforms return
+    /// `RawPacketTransmitUnsupported` explicitly.
     #[error(
         "MCTX: raw datagram source address {datagram_source} does not match configured bind address {configured_bind_addr}"
     )]
@@ -151,8 +155,8 @@ pub enum MctxError {
     RawUnsupportedLinkType(String),
 }
 
+#[cfg(all(feature = "tokio", unix))]
 impl MctxError {
-    #[cfg(feature = "tokio")]
     pub(crate) fn is_would_block(&self) -> bool {
         matches!(
             self,

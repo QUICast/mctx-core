@@ -30,7 +30,7 @@ pub(crate) fn parse_raw_ip_datagram(datagram: &[u8]) -> Result<ParsedRawIpDatagr
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
+#[cfg(any(target_os = "linux", windows, test))]
 pub(crate) fn apply_ttl_or_hop_limit_override(
     datagram: &[u8],
     parsed: ParsedRawIpDatagram,
@@ -123,7 +123,7 @@ fn parse_ipv6_datagram(datagram: &[u8]) -> Result<ParsedRawIpDatagram, MctxError
     })
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
+#[cfg(any(target_os = "linux", windows, test))]
 fn ipv4_header_checksum(header: &[u8]) -> u16 {
     let mut sum = 0u32;
 

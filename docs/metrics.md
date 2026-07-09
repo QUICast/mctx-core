@@ -55,6 +55,19 @@ samples.
 The first call to `sample()` returns `None` because a delta requires two
 snapshots.
 
+Samplers measure elapsed intervals with a monotonic clock, so wall-clock
+adjustments do not distort rates. The snapshot `captured_at` field remains a
+`SystemTime` because it is used for exported timestamps. Direct
+`delta_since()` calls compare those wall-clock timestamps; callers with their
+own monotonic duration can use `delta_since_duration()`. Likewise, `sample()`
+uses the sampler's monotonic clock, while `sample_snapshot()` respects the
+supplied snapshots' `captured_at` values. Callers that capture snapshots with
+their own monotonic clock can use `sample_snapshot_at()`.
+
+Counter updates use a sequence guard, so a concurrent snapshot observes each
+send as one coherent update rather than splitting calls, packets, and bytes
+across intervals.
+
 ## Cumulative Totals
 
 At the context level, these snapshot fields are cumulative totals:
@@ -160,6 +173,11 @@ The canonical sample shape is:
 There is no support for headerless files anymore. Existing files without a
 valid first-line Heimdall header are rejected by the JSONL helper before any
 sample row is appended.
+
+Requested headers are validated before a file is created. A stateful writer
+holds an exclusive advisory writer lock for its lifetime, so a second writer
+fails instead of racing the header or interleaving rows. Each JSON object and
+its newline are serialized into one buffer before being appended.
 
 ## Node ID Resolution
 

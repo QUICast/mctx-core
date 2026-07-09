@@ -34,8 +34,8 @@ cargo add mctx-core --features metrics
 cargo add mctx-core --features raw-packets
 ```
 
-Python bindings are available in
-[`mctx-core-py`](mctx-core-py/README.md).
+Python bindings are covered in the [Python Bindings](docs/python.md) guide; the
+binding crate lives in the repository's `mctx-core-py` workspace directory.
 
 ## Quick Start
 
@@ -90,9 +90,12 @@ platforms.
 
 Raw multicast IP datagram transmit is available behind the `raw-packets`
 feature. Linux and macOS support raw IPv4 and IPv6 transmit. Windows currently
-supports raw IPv4 transmit only. On Linux and macOS IPv6, the source/group
-tuple and transport header are preserved, while the kernel rebuilds the base
-IPv6 header during raw transmit.
+supports raw IPv4 transmit only. Linux uses packet-socket injection when an
+IPv6 datagram source differs from the configured local bind, preserving the
+complete header for AMT forwarding. Linux and macOS use the host raw-IPv6 path
+for matching local sources; that path preserves the source/group tuple and
+transport header while the kernel rebuilds the base IPv6 header. macOS returns
+an explicit unsupported error for remote-source IPv6 injection.
 
 ## License
 

@@ -32,7 +32,11 @@ impl RawPublication {
         &self.config
     }
 
-    /// Sends one complete IP datagram without rewriting its IP header.
+    /// Sends one complete IP datagram through the selected raw backend.
+    ///
+    /// Link-layer backends preserve the supplied header. Host-stack IPv6
+    /// backends rebuild the base IPv6 header and only accept a matching local
+    /// source address.
     pub fn send_raw(&self, ip_datagram: &[u8]) -> Result<RawSendReport, MctxError> {
         send_raw_ip_datagram(&self.socket, self.id, &self.config, ip_datagram)
     }

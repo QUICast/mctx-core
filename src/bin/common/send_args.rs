@@ -15,6 +15,7 @@ pub(crate) struct SendCliArgs {
     pub interface_index: Option<u32>,
     pub ttl: Option<u32>,
     pub loopback: bool,
+    pub quiet: bool,
 }
 
 impl SendCliArgs {
@@ -83,6 +84,7 @@ pub(crate) fn parse_send_cli_args(args: &[String]) -> Result<SendCliArgs, String
         interface_index: None,
         ttl: None,
         loopback: true,
+        quiet: false,
     };
 
     let mut index = 4;
@@ -141,6 +143,10 @@ pub(crate) fn parse_send_cli_args(args: &[String]) -> Result<SendCliArgs, String
                 parsed.loopback = false;
                 index += 1;
             }
+            "--quiet" => {
+                parsed.quiet = true;
+                index += 1;
+            }
             unknown => return Err(format!("unknown argument: {unknown}")),
         }
     }
@@ -181,7 +187,7 @@ pub(crate) fn parse_send_cli_args(args: &[String]) -> Result<SendCliArgs, String
 pub(crate) fn print_usage(program: &str, _show_metrics: bool) {
     eprintln!("Usage:");
     eprintln!(
-        "  {program} <group> <dst_port> <payload> [count] [interval_ms] [--source <ip>] [--source-port <port>] [--bind <ip:port>] [--interface <ip>] [--interface-index <idx>] [--ttl <ttl>] [--no-loopback]"
+        "  {program} <group> <dst_port> <payload> [count] [interval_ms] [--source <ip>] [--source-port <port>] [--bind <ip:port>] [--interface <ip>] [--interface-index <idx>] [--ttl <ttl>] [--no-loopback] [--quiet]"
     );
     eprintln!();
     eprintln!("Examples:");
@@ -350,6 +356,7 @@ mod tests {
             interface_index: None,
             ttl: None,
             loopback: true,
+            quiet: false,
         };
 
         let config = parsed.build_config().unwrap();
@@ -376,6 +383,7 @@ mod tests {
             interface_index: None,
             ttl: Some(4),
             loopback: false,
+            quiet: false,
         };
 
         let config = parsed.build_config().unwrap();

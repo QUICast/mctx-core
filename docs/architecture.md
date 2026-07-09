@@ -15,4 +15,5 @@ Design choices:
 - IPv4 and IPv6 socket setup stay in separate implementation branches
 - the resolved destination is stored on the `Publication`, which matters for
   IPv6 scope-ID handling
-- the default feature set stays small; metrics and Tokio support are opt-in
+- the default feature set stays small; metrics, Tokio, and raw packet support
+  are opt-in

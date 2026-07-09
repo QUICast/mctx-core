@@ -44,6 +44,12 @@ cargo run --bin mctx_send -- ff32::8000:1234 5000 hello-v6 --source fe80::1234 -
 cargo run --bin mctx_send -- 239.1.2.3 5000 hello 100 10
 ```
 
+Use `--quiet` to suppress per-packet output for throughput testing:
+
+```bash
+cargo run --release --bin mctx_send -- 239.1.2.3 5000 hello 100000 0 --quiet
+```
+
 ## Sender Metrics JSONL
 
 ```bash

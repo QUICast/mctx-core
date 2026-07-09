@@ -10,25 +10,33 @@ from mctx_core import AsyncPublication, Context
 
 def _multicast_receiver(group: str) -> tuple[socket.socket, int]:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-    except OSError:
-        pass
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except OSError:
+            pass
 
-    sock.bind(("", 0))
-    port = sock.getsockname()[1]
-    membership = struct.pack(
-        "=4s4s",
-        socket.inet_aton(group),
-        socket.inet_aton("0.0.0.0"),
-    )
-    sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, membership)
-    sock.settimeout(1.0)
-    return sock, port
+        sock.bind(("", 0))
+        port = sock.getsockname()[1]
+        membership = struct.pack(
+            "=4s4s",
+            socket.inet_aton(group),
+            socket.inet_aton("0.0.0.0"),
+        )
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, membership)
+        sock.settimeout(1.0)
+        return sock, port
+    except Exception:
+        sock.close()
+        raise
 
 
 class BindingsTest(unittest.TestCase):
+    def test_async_publication_rejects_non_positive_poll_interval(self) -> None:
+        with self.assertRaises(ValueError):
+            AsyncPublication(None, poll_interval=0)  # type: ignore[arg-type]
+
     def test_context_publication_sends_packet(self) -> None:
         receiver, port = _multicast_receiver("239.1.2.30")
         with receiver:

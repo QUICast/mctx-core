@@ -63,7 +63,8 @@ println!("ip protocol: {:?}", report.ip_protocol);
 
 `RawPublicationConfig` keeps interface selection explicit:
 
-- `family`: optional fixed IPv4 or IPv6 family, otherwise inferred per datagram
+- `family`: optional fixed IPv4 or IPv6 family, otherwise inferred from the
+  local bind or interface selector at publication creation
 - `bind_addr`: local IP used to select and validate the egress interface
 - `outgoing_interface`: explicit interface selection by IPv4/IPv6 local address
   or IPv6 interface index
@@ -77,8 +78,12 @@ Important distinction:
   observe
 - `bind_addr` and `outgoing_interface` only select where the datagram is
   emitted
-- on the current Linux/macOS IPv6 raw-socket backend, an explicit `bind_addr`
-  must agree with the datagram source when both are present
+- a matching IPv6 `bind_addr` selects the host-stack raw socket, which supports
+  same-host receive
+- on Linux, a distinct datagram source selects packet-socket injection and
+  preserves the complete IPv6 header for remote-source forwarding
+- on macOS, a distinct IPv6 datagram source returns an explicit unsupported
+  error because no link-layer transmit backend is currently provided
 
 The raw path never silently falls back to ordinary UDP payload send.
 
@@ -87,7 +92,7 @@ The raw path never silently falls back to ordinary UDP payload send.
 The repo includes a small convenience sender binary:
 
 ```bash
-cargo run --features raw-packets --bin mctx_raw_send -- <group> <dst_port> <payload> [count] [interval_ms] --source <ip> [--source-port <port>] [--interface <ip>] [--interface-index <idx>] [--ttl <ttl>] [--no-loopback]
+cargo run --features raw-packets --bin mctx_raw_send -- <group> <dst_port> <payload> [count] [interval_ms] --source <ip> [--bind <local-ip>] [--source-port <port>] [--interface <ip>] [--interface-index <idx>] [--ttl <ttl>] [--no-loopback] [--quiet]
 ```
 
 It builds a complete UDP-in-IP datagram and sends it through the raw API.
@@ -95,11 +100,11 @@ It builds a complete UDP-in-IP datagram and sends it through the raw API.
 That makes it useful for validation with ordinary multicast UDP receivers such
 as `mcrx_recv_meta`.
 
-For Linux and macOS, the current IPv6 backend uses raw IPv6 sockets rather than
-link-layer injection so the local host stack can still observe same-host
-multicast in practical UDP-in-IP tests. Windows raw IPv6 transmit is still not
-implemented, so cross-host validation and packet capture remain the right tools
-there.
+For matching local IPv6 sources, Linux and macOS use raw IPv6 sockets so the
+local host stack can observe same-host multicast in practical UDP-in-IP tests.
+Linux switches to link-layer injection when the supplied source is remote;
+macOS reports that case as unsupported. Windows raw IPv6 transmit is not
+implemented.
 
 Example:
 
@@ -108,8 +113,9 @@ cargo run --features raw-packets --bin mctx_raw_send -- 239.255.12.34 5000 hello
 ```
 
 The `--source` flag is required because it becomes the source IP encoded into
-the raw IP header. It is also used as the default local bind address unless you
-override egress with `--interface` or `--interface-index`.
+the raw IP header. It is also used as the default local bind address. Use
+`--bind <local-ip>` when forwarding a datagram whose original source is remote.
+`--interface` or `--interface-index` independently selects egress.
 
 ## Receiver Pairings
 
@@ -167,8 +173,21 @@ IPv6 cross-machine SSM-style test on Linux or macOS:
 cargo run --bin mcrx_recv_meta -- ff3e::8000:1234 5000 --source <sender-ipv6> --interface <receiver-ipv6-or-ifindex>
 
 # sender
-cargo run --features raw-packets --bin mctx_raw_send -- ff3e::8000:1234 5000 hello-v6 5 100 --source <sender-ipv6> --source-port 4000 --interface <sender-ipv6-or-ifindex>
+cargo run --features raw-packets --bin mctx_raw_send -- ff3e::8000:1234 5000 hello-v6 5 100 --source <sender-ipv6> --source-port 4000 --interface <sender-ipv6>
 ```
+
+Linux AMT-style forwarding with an original remote source uses a distinct local
+bind and the packet-socket backend:
+
+```bash
+cargo run --features raw-packets --bin mctx_raw_send -- ff3e::8000:1234 5000 hello-v6 5 100 \
+  --source <original-remote-source> \
+  --bind <local-egress-ipv6> \
+  --interface <local-egress-ipv6>
+```
+
+The packet is expected on the network and is not reinjected into the sender's
+local receive path.
 
 ## Raw Send Report
 
@@ -187,8 +206,8 @@ cargo run --features raw-packets --bin mctx_raw_send -- ff3e::8000:1234 5000 hel
 
 Current first-pass support:
 
-- Linux: IPv4 via `IP_HDRINCL` raw sockets, IPv6 via raw IPv6 sockets with a
-  kernel-built base IPv6 header
+- Linux: IPv4 via `IP_HDRINCL`; matching local-source IPv6 via raw IPv6 sockets;
+  remote-source IPv6 via an Ethernet packet socket
 - macOS: IPv4 via `IP_HDRINCL` raw sockets, IPv6 via raw IPv6 sockets with a
   kernel-built base IPv6 header
 - Windows: implemented for IPv4 with raw sockets
@@ -210,19 +229,23 @@ three sender platforms have been observed to reach all three receivers.
 
 ### Linux
 
-The current implementation uses raw IP sockets for IPv4 and raw IPv6 sockets
-for IPv6.
+The current implementation uses raw IP sockets for IPv4 and local-source IPv6.
+Remote-source IPv6 uses a packet socket so the complete supplied header can be
+injected without requiring the original source to exist locally.
 
 Practical notes:
 
 - raw packet transmit usually requires `CAP_NET_RAW` or root
 - the caller-supplied IPv4 header is transmitted with `IP_HDRINCL`
-- for IPv6, the API still accepts a complete IPv6 datagram, but Linux rebuilds
-  the base IPv6 header on transmit from the configured source, destination,
-  next-header, and hop-limit
-- this preserves the source/group tuple and transport header for AMT/SSM-style
-  UDP forwarding while allowing same-host multicast delivery through the local
-  IP stack
+- when the datagram source matches `bind_addr`, Linux rebuilds the base IPv6
+  header from the source, destination, next-header, and hop limit; this keeps
+  same-host multicast delivery working
+- when the datagram source differs, Linux uses packet-socket injection and
+  preserves the complete IPv6 datagram for AMT/SSM forwarding
+- packet-socket injection requires an Ethernet-like interface and does not feed
+  the transmitted packet back through the local IP receive path
+- packet-socket injection cannot enable local loopback; an explicit
+  `loopback = true` returns an unsupported error
 - explicit loopback control is supported for the IPv4 and IPv6 raw-socket paths
 - non-multicast raw transmit is not currently implemented
 
@@ -241,11 +264,11 @@ Practical notes:
 - IPv4 uses `IP_HDRINCL`
 - IPv6 multicast still sets `IPV6_MULTICAST_IF` explicitly, and link-local
   binds keep their interface scope
-- when both are present on IPv6, `bind_addr` must match the datagram source
+- the IPv6 datagram source must match the local bind address
 - for IPv6, the kernel rebuilds the base IPv6 header on transmit instead of
   accepting a caller-supplied full IPv6 header byte-for-byte
-- this keeps the source/group tuple and UDP payload semantics intact while
-  making same-host multicast receive practical
+- a distinct remote IPv6 source returns `RawPacketTransmitUnsupported` rather
+  than silently sending with a rewritten source
 
 ### Windows
 
@@ -303,8 +326,8 @@ The raw path validates:
 This API is intended for AMT-style full-datagram forwarding and other cases
 where source fidelity matters.
 
-`mctx-core` does not add AMT logic itself. It simply provides a way to transmit
-the original source/group tuple and transport header without rewriting them
-through a normal UDP socket. On Linux and macOS IPv6, the kernel still rebuilds
-the base IPv6 header as part of the raw IPv6 socket API, so arbitrary IPv6
-header byte-for-byte fidelity is not promised there.
+`mctx-core` does not add AMT logic itself. Linux can inject a remote-source IPv6
+datagram through its packet-socket path with complete-header fidelity. The
+Linux and macOS host-stack IPv6 paths are intended for matching local sources;
+the kernel rebuilds the base IPv6 header there. macOS and Windows return an
+explicit unsupported error where remote-source IPv6 fidelity is unavailable.

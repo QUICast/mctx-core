@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 
 from ._mctx_core import Publication, SendReport
 
@@ -11,8 +12,10 @@ class AsyncPublication:
         publication: Publication,
         *,
         loop: asyncio.AbstractEventLoop | None = None,
-        poll_interval: float = 0.01,
+        poll_interval: float = 0.001,
     ) -> None:
+        if not math.isfinite(poll_interval) or poll_interval <= 0:
+            raise ValueError("poll_interval must be greater than zero")
         self.publication = publication
         self._loop = loop
         self._poll_interval = poll_interval
