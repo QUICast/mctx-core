@@ -291,7 +291,9 @@ mod tests {
     use super::*;
     #[cfg(feature = "metrics")]
     use crate::metrics::ContextMetricsSampler;
-    use crate::test_support::{TEST_GROUP, recv_payload, test_multicast_receiver};
+    use crate::test_support::{
+        TEST_GROUP, multicast_test_result_or_skip, recv_payload, test_multicast_receiver,
+    };
     use std::net::Ipv4Addr;
 
     #[test]
@@ -301,7 +303,9 @@ mod tests {
         let config = PublicationConfig::new(TEST_GROUP, port);
         let id = context.add_publication(config).unwrap();
 
-        let report = context.send(id, b"context hello").unwrap();
+        let Some(report) = multicast_test_result_or_skip(context.send(id, b"context hello")) else {
+            return;
+        };
         let payload = recv_payload(&receiver);
 
         assert_eq!(report.bytes_sent, b"context hello".len());
@@ -330,7 +334,9 @@ mod tests {
         let mut sampler = ContextMetricsSampler::new(&context);
 
         assert!(sampler.sample().is_none());
-        context.send(id, b"metrics").unwrap();
+        if multicast_test_result_or_skip(context.send(id, b"metrics")).is_none() {
+            return;
+        }
 
         let snapshot = context.metrics_snapshot();
         let delta = sampler.sample().unwrap();
@@ -359,7 +365,9 @@ mod tests {
             .add_publication(PublicationConfig::new(TEST_GROUP, port))
             .unwrap();
 
-        context.send(id, b"lifetime").unwrap();
+        if multicast_test_result_or_skip(context.send(id, b"lifetime")).is_none() {
+            return;
+        }
         let before_removal = context.metrics_snapshot();
         assert!(context.remove_publication(id));
 

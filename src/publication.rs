@@ -647,65 +647,26 @@ mod tests {
     #[cfg(feature = "metrics")]
     use crate::metrics::PublicationMetricsSampler;
     use crate::test_support::{
-        TEST_GROUP, TEST_GROUP_V6_GLOBAL, TEST_GROUP_V6_SAME_HOST, recv_payload,
-        recv_payload_with_source, test_multicast_receiver, test_multicast_receiver_v6,
+        TEST_GROUP, TEST_GROUP_V6_GLOBAL, TEST_GROUP_V6_SAME_HOST, multicast_test_result_or_skip,
+        recv_payload, recv_payload_with_source, test_multicast_receiver,
+        test_multicast_receiver_v6,
     };
     use socket2::{Domain, Protocol, SockAddr, Type};
-
-    fn is_ipv6_multicast_network_unreachable(error: &MctxError) -> bool {
-        matches!(
-            error,
-            MctxError::SocketConnectFailed(error) | MctxError::SendFailed(error)
-                if error.kind() == std::io::ErrorKind::NetworkUnreachable
-        )
-    }
-
-    fn new_ipv6_publication_or_skip(config: PublicationConfig) -> Option<Publication> {
-        match Publication::new(PublicationId(1), config) {
-            Ok(publication) => Some(publication),
-            Err(error) if is_ipv6_multicast_network_unreachable(&error) => {
-                eprintln!("skipping IPv6 multicast integration test: {error}");
-                None
-            }
-            Err(error) => panic!("failed to create IPv6 publication: {error}"),
-        }
-    }
-
-    fn send_ipv6_or_skip(publication: &Publication, payload: &[u8]) -> Option<SendReport> {
-        match publication.send(payload) {
-            Ok(report) => Some(report),
-            Err(error) if is_ipv6_multicast_network_unreachable(&error) => {
-                eprintln!("skipping IPv6 multicast integration test: {error}");
-                None
-            }
-            Err(error) => panic!("failed to send IPv6 multicast test packet: {error}"),
-        }
-    }
-
-    #[test]
-    fn only_network_unreachable_ipv6_errors_are_skippable() {
-        assert!(is_ipv6_multicast_network_unreachable(
-            &MctxError::SocketConnectFailed(std::io::Error::from(
-                std::io::ErrorKind::NetworkUnreachable,
-            ))
-        ));
-        assert!(is_ipv6_multicast_network_unreachable(
-            &MctxError::SendFailed(std::io::Error::from(std::io::ErrorKind::NetworkUnreachable))
-        ));
-        assert!(!is_ipv6_multicast_network_unreachable(
-            &MctxError::SocketConnectFailed(std::io::Error::from(
-                std::io::ErrorKind::AddrNotAvailable,
-            ))
-        ));
-    }
 
     #[test]
     fn publication_send_reaches_a_local_receiver() {
         let (receiver, port) = test_multicast_receiver();
-        let publication =
-            Publication::new(PublicationId(1), PublicationConfig::new(TEST_GROUP, port)).unwrap();
+        let Some(publication) = multicast_test_result_or_skip(Publication::new(
+            PublicationId(1),
+            PublicationConfig::new(TEST_GROUP, port),
+        )) else {
+            return;
+        };
 
-        let report = publication.send(b"hello multicast").unwrap();
+        let Some(report) = multicast_test_result_or_skip(publication.send(b"hello multicast"))
+        else {
+            return;
+        };
         let payload = recv_payload(&receiver);
         let announce = publication.announce_tuple().unwrap();
 
@@ -725,15 +686,17 @@ mod tests {
         let interface = Ipv6Addr::LOCALHOST;
         let source = Ipv6Addr::LOCALHOST;
         let (receiver, port) = test_multicast_receiver_v6(TEST_GROUP_V6_SAME_HOST, interface);
-        let Some(publication) = new_ipv6_publication_or_skip(
+        let Some(publication) = multicast_test_result_or_skip(Publication::new(
+            PublicationId(1),
             PublicationConfig::new(TEST_GROUP_V6_SAME_HOST, port)
                 .with_source_addr(source)
                 .with_outgoing_interface(interface),
-        ) else {
+        )) else {
             return;
         };
 
-        let Some(report) = send_ipv6_or_skip(&publication, b"hello multicast v6") else {
+        let Some(report) = multicast_test_result_or_skip(publication.send(b"hello multicast v6"))
+        else {
             return;
         };
         let (payload, sender) = recv_payload_with_source(&receiver);
@@ -756,14 +719,15 @@ mod tests {
     fn ipv6_interface_address_auto_binds_the_sender_source() {
         let interface = Ipv6Addr::LOCALHOST;
         let (receiver, port) = test_multicast_receiver_v6(TEST_GROUP_V6_SAME_HOST, interface);
-        let Some(publication) = new_ipv6_publication_or_skip(
+        let Some(publication) = multicast_test_result_or_skip(Publication::new(
+            PublicationId(1),
             PublicationConfig::new(TEST_GROUP_V6_SAME_HOST, port)
                 .with_outgoing_interface(interface),
-        ) else {
+        )) else {
             return;
         };
 
-        let Some(report) = send_ipv6_or_skip(&publication, b"auto-bind v6") else {
+        let Some(report) = multicast_test_result_or_skip(publication.send(b"auto-bind v6")) else {
             return;
         };
         let (_payload, sender) = recv_payload_with_source(&receiver);
@@ -774,10 +738,11 @@ mod tests {
 
     #[test]
     fn wider_scope_ipv6_group_clears_destination_scope_id() {
-        let Some(publication) = new_ipv6_publication_or_skip(
+        let Some(publication) = multicast_test_result_or_skip(Publication::new(
+            PublicationId(1),
             PublicationConfig::new(TEST_GROUP_V6_GLOBAL, 5000)
                 .with_source_addr(Ipv6Addr::LOCALHOST),
-        ) else {
+        )) else {
             return;
         };
 
@@ -788,12 +753,18 @@ mod tests {
     #[test]
     fn publication_metrics_track_successful_sends() {
         let (_receiver, port) = test_multicast_receiver();
-        let publication =
-            Publication::new(PublicationId(1), PublicationConfig::new(TEST_GROUP, port)).unwrap();
+        let Some(publication) = multicast_test_result_or_skip(Publication::new(
+            PublicationId(1),
+            PublicationConfig::new(TEST_GROUP, port),
+        )) else {
+            return;
+        };
         let mut sampler = PublicationMetricsSampler::new(&publication);
 
         assert!(sampler.sample().is_none());
-        publication.send(b"metrics packet").unwrap();
+        if multicast_test_result_or_skip(publication.send(b"metrics packet")).is_none() {
+            return;
+        }
 
         let snapshot = publication.metrics_snapshot();
         let delta = sampler.sample().unwrap();

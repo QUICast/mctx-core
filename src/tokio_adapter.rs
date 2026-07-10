@@ -135,7 +135,9 @@ impl TokioPublication {
 #[cfg(all(test, feature = "tokio"))]
 mod tests {
     use super::*;
-    use crate::test_support::{TEST_GROUP, recv_payload, test_multicast_receiver};
+    use crate::test_support::{
+        TEST_GROUP, is_multicast_test_network_unavailable, recv_payload, test_multicast_receiver,
+    };
     use crate::{Context, PublicationConfig};
 
     #[tokio::test]
@@ -149,7 +151,14 @@ mod tests {
         let publication = context.take_publication(id).unwrap();
         let publication = TokioPublication::new(publication).unwrap();
 
-        publication.send(b"tokio hello").await.unwrap();
+        match publication.send(b"tokio hello").await {
+            Ok(_) => {}
+            Err(TokioSendError::Send(error)) if is_multicast_test_network_unavailable(&error) => {
+                eprintln!("skipping multicast integration test: {error}");
+                return;
+            }
+            Err(error) => panic!("tokio multicast integration test failed: {error}"),
+        }
         let payload = recv_payload(&receiver);
 
         assert_eq!(payload, b"tokio hello");
