@@ -595,8 +595,7 @@ fn open_windows_raw_socket_v4(
     config: &RawPublicationConfig,
 ) -> Result<RawTransmitSocket, MctxError> {
     let selection = resolve_raw_ipv4_selection(config)?;
-    let probe_socket =
-        open_raw_ipv4_socket_with_protocol(selection, config.loopback, IPPROTO_RAW as i32)?;
+    let probe_socket = open_raw_ipv4_socket_with_protocol(selection, config.loopback, IPPROTO_RAW)?;
     drop(probe_socket);
 
     Ok(RawTransmitSocket {
