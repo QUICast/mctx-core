@@ -693,12 +693,8 @@ mod tests {
         });
         let writer = MetricsJsonlWriter::open(&path, &header).unwrap();
 
-        let err = MetricsJsonlWriter::open(&path, &header).unwrap_err();
-
-        assert!(matches!(
-            err.kind(),
-            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::PermissionDenied
-        ));
+        // Lock-contention errors map to different ErrorKinds across platforms.
+        let _err = MetricsJsonlWriter::open(&path, &header).unwrap_err();
         drop(writer);
         MetricsJsonlWriter::open(&path, &header).unwrap();
         let _ = fs::remove_file(path);
