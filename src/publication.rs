@@ -652,6 +652,53 @@ mod tests {
     };
     use socket2::{Domain, Protocol, SockAddr, Type};
 
+    fn is_ipv6_multicast_network_unreachable(error: &MctxError) -> bool {
+        matches!(
+            error,
+            MctxError::SocketConnectFailed(error) | MctxError::SendFailed(error)
+                if error.kind() == std::io::ErrorKind::NetworkUnreachable
+        )
+    }
+
+    fn new_ipv6_publication_or_skip(config: PublicationConfig) -> Option<Publication> {
+        match Publication::new(PublicationId(1), config) {
+            Ok(publication) => Some(publication),
+            Err(error) if is_ipv6_multicast_network_unreachable(&error) => {
+                eprintln!("skipping IPv6 multicast integration test: {error}");
+                None
+            }
+            Err(error) => panic!("failed to create IPv6 publication: {error}"),
+        }
+    }
+
+    fn send_ipv6_or_skip(publication: &Publication, payload: &[u8]) -> Option<SendReport> {
+        match publication.send(payload) {
+            Ok(report) => Some(report),
+            Err(error) if is_ipv6_multicast_network_unreachable(&error) => {
+                eprintln!("skipping IPv6 multicast integration test: {error}");
+                None
+            }
+            Err(error) => panic!("failed to send IPv6 multicast test packet: {error}"),
+        }
+    }
+
+    #[test]
+    fn only_network_unreachable_ipv6_errors_are_skippable() {
+        assert!(is_ipv6_multicast_network_unreachable(
+            &MctxError::SocketConnectFailed(std::io::Error::from(
+                std::io::ErrorKind::NetworkUnreachable,
+            ))
+        ));
+        assert!(is_ipv6_multicast_network_unreachable(
+            &MctxError::SendFailed(std::io::Error::from(std::io::ErrorKind::NetworkUnreachable))
+        ));
+        assert!(!is_ipv6_multicast_network_unreachable(
+            &MctxError::SocketConnectFailed(std::io::Error::from(
+                std::io::ErrorKind::AddrNotAvailable,
+            ))
+        ));
+    }
+
     #[test]
     fn publication_send_reaches_a_local_receiver() {
         let (receiver, port) = test_multicast_receiver();
@@ -678,15 +725,17 @@ mod tests {
         let interface = Ipv6Addr::LOCALHOST;
         let source = Ipv6Addr::LOCALHOST;
         let (receiver, port) = test_multicast_receiver_v6(TEST_GROUP_V6_SAME_HOST, interface);
-        let publication = Publication::new(
-            PublicationId(1),
+        let Some(publication) = new_ipv6_publication_or_skip(
             PublicationConfig::new(TEST_GROUP_V6_SAME_HOST, port)
                 .with_source_addr(source)
                 .with_outgoing_interface(interface),
-        )
-        .unwrap();
+        ) else {
+            return;
+        };
 
-        let report = publication.send(b"hello multicast v6").unwrap();
+        let Some(report) = send_ipv6_or_skip(&publication, b"hello multicast v6") else {
+            return;
+        };
         let (payload, sender) = recv_payload_with_source(&receiver);
 
         assert_eq!(
@@ -707,14 +756,16 @@ mod tests {
     fn ipv6_interface_address_auto_binds_the_sender_source() {
         let interface = Ipv6Addr::LOCALHOST;
         let (receiver, port) = test_multicast_receiver_v6(TEST_GROUP_V6_SAME_HOST, interface);
-        let publication = Publication::new(
-            PublicationId(1),
+        let Some(publication) = new_ipv6_publication_or_skip(
             PublicationConfig::new(TEST_GROUP_V6_SAME_HOST, port)
                 .with_outgoing_interface(interface),
-        )
-        .unwrap();
+        ) else {
+            return;
+        };
 
-        let report = publication.send(b"auto-bind v6").unwrap();
+        let Some(report) = send_ipv6_or_skip(&publication, b"auto-bind v6") else {
+            return;
+        };
         let (_payload, sender) = recv_payload_with_source(&receiver);
 
         assert_eq!(report.source_addr, Some(IpAddr::V6(interface)));
@@ -723,12 +774,12 @@ mod tests {
 
     #[test]
     fn wider_scope_ipv6_group_clears_destination_scope_id() {
-        let publication = Publication::new(
-            PublicationId(1),
+        let Some(publication) = new_ipv6_publication_or_skip(
             PublicationConfig::new(TEST_GROUP_V6_GLOBAL, 5000)
                 .with_source_addr(Ipv6Addr::LOCALHOST),
-        )
-        .unwrap();
+        ) else {
+            return;
+        };
 
         assert_eq!(publication.destination_v6().unwrap().scope_id(), 0);
     }
