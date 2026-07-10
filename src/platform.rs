@@ -1,5 +1,5 @@
 use crate::MctxError;
-#[cfg(feature = "raw-packets")]
+#[cfg(any(feature = "raw-packets", feature = "raw-ip"))]
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 
@@ -9,7 +9,7 @@ fn aligned_ffi_buffer<T>(byte_len: u32) -> Vec<std::mem::MaybeUninit<T>> {
     Vec::with_capacity(element_count)
 }
 
-#[cfg(all(unix, feature = "raw-packets"))]
+#[cfg(all(unix, any(feature = "raw-packets", feature = "raw-ip")))]
 pub(crate) fn resolve_ipv4_interface_index(interface: Ipv4Addr) -> Result<u32, MctxError> {
     fn ambiguous_interface_error(interface: Ipv4Addr, first: u32, second: u32) -> MctxError {
         MctxError::InterfaceDiscoveryFailed(format!(
@@ -114,7 +114,7 @@ pub(crate) fn resolve_ipv6_interface_index(interface: Ipv6Addr) -> Result<u32, M
     }
 }
 
-#[cfg(all(windows, feature = "raw-packets"))]
+#[cfg(all(windows, any(feature = "raw-packets", feature = "raw-ip")))]
 pub(crate) fn resolve_ipv4_interface_index(interface: Ipv4Addr) -> Result<u32, MctxError> {
     use windows_sys::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, NO_ERROR};
     use windows_sys::Win32::NetworkManagement::IpHelper::{

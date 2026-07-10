@@ -17,3 +17,5 @@ Design choices:
   IPv6 scope-ID handling
 - the default feature set stays small; metrics, Tokio, and raw packet support
   are opt-in
+- `raw-packets` owns multicast forwarding semantics, while `raw-ip` is a
+  separate caller-built IP datagram transport primitive for control traffic

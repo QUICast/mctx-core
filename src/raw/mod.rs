@@ -16,7 +16,6 @@ mod linux_packet;
 mod platform;
 mod publication;
 mod report;
-mod socket_cache;
 
 pub use config::{RawPublicationConfig, RawValidationMode};
 pub use context::RawContext;

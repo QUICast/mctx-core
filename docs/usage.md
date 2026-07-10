@@ -128,7 +128,8 @@ let (source, group, udp_port) = publication.announce_tuple()?;
 
 - Tokio: enable `tokio` and use `TokioPublication`; see [Demo Binaries](demo.md).
 - Metrics: enable `metrics`; see [Metrics](metrics.md).
-- Raw IP datagrams: enable `raw-packets`; see [Raw Packet Transmit](raw-packets.md).
+- Multicast raw IP datagrams: enable `raw-packets`; see [Raw Packet Transmit](raw-packets.md).
+- Generic raw IP control datagrams: enable `raw-ip`; see [Raw IP Control Transmit](raw-ip.md).
 - Python bindings: see [Python Bindings](python.md).
 
 ## Removing and Taking Ownership

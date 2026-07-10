@@ -109,7 +109,7 @@ pub enum MctxError {
     #[error("MCTX: send failed: {0}")]
     SendFailed(io::Error),
 
-    /// Raw multicast packet transmit is not supported on the current platform or configuration.
+    /// Raw packet transmit is not supported on the current platform or configuration.
     #[error("MCTX: raw packet transmit is unsupported: {0}")]
     RawPacketTransmitUnsupported(String),
 
@@ -133,11 +133,13 @@ pub enum MctxError {
     #[error("MCTX: raw datagram destination must be multicast")]
     InvalidRawMulticastDestination,
 
-    /// Compatibility variant for the former local-source-only IPv6 raw path.
+    /// The supplied IPv6 datagram source does not match the configured local
+    /// bind address required by a host-stack raw IPv6 backend.
     ///
-    /// Current backends no longer emit this error: Linux uses link-layer
-    /// injection for remote IPv6 sources, while unsupported platforms return
-    /// `RawPacketTransmitUnsupported` explicitly.
+    /// The multicast raw-packet backend does not emit this error on Linux,
+    /// where remote sources use link-layer injection. The generic `raw-ip`
+    /// backend emits it when a kernel-built IPv6 base header would otherwise
+    /// select or rewrite a different source address.
     #[error(
         "MCTX: raw datagram source address {datagram_source} does not match configured bind address {configured_bind_addr}"
     )]

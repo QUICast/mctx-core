@@ -9,7 +9,11 @@ mod platform;
 pub mod publication;
 #[cfg(feature = "raw-packets")]
 pub mod raw;
+#[cfg(feature = "raw-ip")]
+pub mod raw_ip;
 pub mod report;
+#[cfg(any(feature = "raw-packets", feature = "raw-ip"))]
+mod socket_cache;
 #[cfg(test)]
 mod test_support;
 #[cfg(feature = "tokio")]
@@ -31,6 +35,11 @@ pub use publication::{Publication, PublicationId, PublicationParts};
 pub use raw::{
     RawContext, RawPublication, RawPublicationConfig, RawPublicationId, RawSendReport,
     RawValidationMode,
+};
+#[cfg(feature = "raw-ip")]
+pub use raw_ip::{
+    RawIpCapabilities, RawIpCapability, RawIpContext, RawIpPublication, RawIpPublicationConfig,
+    RawIpPublicationId, RawIpSendReport, RawIpSocketConfig, raw_ip_capabilities,
 };
 pub use report::SendReport;
 #[cfg(feature = "tokio")]

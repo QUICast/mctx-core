@@ -5,8 +5,9 @@ ASM/SSM-style traffic.
 
 The default API focuses on lightweight UDP multicast send with explicit socket
 ownership, deterministic source/interface control, and non-blocking operation.
-Optional features add Tokio integration, metrics, raw IP datagram transmit, and
-Python bindings without changing the default UDP send path.
+Optional features add Tokio integration, metrics, multicast raw-IP forwarding,
+generic raw-IP control transmit, and Python bindings without changing the
+default UDP send path.
 
 ## Highlights
 
@@ -17,7 +18,7 @@ Python bindings without changing the default UDP send path.
   `ff38` / `ff3e`
 - Non-blocking send API with caller-owned context and socket extraction
 - Caller-provided socket support
-- Optional `tokio`, `metrics`, and `raw-packets` features
+- Optional `tokio`, `metrics`, `raw-packets`, and `raw-ip` features
 - Optional Python bindings in the sibling `mctx-core-py` crate
 
 ## Install
@@ -26,12 +27,15 @@ Python bindings without changing the default UDP send path.
 cargo add mctx-core
 ```
 
+The minimum supported Rust version is 1.88.
+
 Optional feature examples:
 
 ```bash
 cargo add mctx-core --features tokio
 cargo add mctx-core --features metrics
 cargo add mctx-core --features raw-packets
+cargo add mctx-core --features raw-ip
 ```
 
 Python bindings are covered in the [Python Bindings](docs/python.md) guide; the
@@ -64,6 +68,8 @@ For IPv6 examples, source/interface rules, and CLI commands, see
 - `metrics`: snapshots, deltas, samplers, and Heimdall-style JSONL helpers.
 - `raw-packets`: complete multicast IP datagram transmit for AMT-style use
   cases.
+- `raw-ip`: complete unicast or multicast IP datagram transmit for caller-built
+  control traffic such as ICMP Packet Too Big.
 - `mctx-core-py`: sibling workspace crate with Python and asyncio bindings.
 
 ## Documentation
@@ -71,6 +77,7 @@ For IPv6 examples, source/interface rules, and CLI commands, see
 - [Usage Guide](docs/usage.md): core Rust sender API flow.
 - [IPv6 Multicast](docs/ipv6.md): source vs interface, scopes, and SSM group rules.
 - [Raw Packet Transmit](docs/raw-packets.md): `raw-packets` API and platform limits.
+- [Raw IP Control Transmit](docs/raw-ip.md): `raw-ip` API and platform limits.
 - [Demo Binaries](docs/demo.md): sender CLI commands and metrics examples.
 - [Metrics](docs/metrics.md): snapshot, delta, and JSONL semantics.
 - [Python Bindings](docs/python.md): Python API and asyncio helper.
@@ -96,6 +103,13 @@ complete header for AMT forwarding. Linux and macOS use the host raw-IPv6 path
 for matching local sources; that path preserves the source/group tuple and
 transport header while the kernel rebuilds the base IPv6 header. macOS returns
 an explicit unsupported error for remote-source IPv6 injection.
+
+Generic raw-IP control transmit is available behind the independent `raw-ip`
+feature. It accepts a complete caller-supplied unicast or multicast datagram.
+Linux and macOS support IPv4 `IP_HDRINCL`-style transmit and an explicit
+kernel-built IPv6 base-header path. Windows supports IPv4 only; raw IPv6
+returns an explicit unsupported error. See [Raw IP Control Transmit](docs/raw-ip.md)
+for source-preservation and privilege requirements.
 
 ## License
 

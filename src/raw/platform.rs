@@ -11,8 +11,8 @@ use crate::raw::datagram::apply_ttl_or_hop_limit_override;
 use crate::raw::datagram::{ParsedRawIpDatagram, parse_raw_ip_datagram};
 #[cfg(target_os = "linux")]
 use crate::raw::linux_packet;
-use crate::raw::socket_cache::BoundedSocketCache;
 use crate::raw::{RawPublicationConfig, RawPublicationId, RawSendReport};
+use crate::socket_cache::BoundedSocketCache;
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 #[cfg(target_os = "macos")]

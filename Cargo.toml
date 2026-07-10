@@ -1,7 +1,8 @@
 [package]
 name = "mctx-core"
-version = "0.2.6"
+version = "0.3.0"
 edition = "2024"
+rust-version = "1.88"
 license = "BSD-2-Clause"
 description = "Runtime-agnostic and portable IPv4 and IPv6 multicast sender library."
 readme = "README.md"
@@ -11,12 +12,16 @@ documentation = "https://docs.rs/mctx-core"
 keywords = ["multicast", "udp", "networking", "sender", "ssm"]
 categories = ["network-programming"]
 
+[package.metadata.docs.rs]
+all-features = true
+
 [workspace]
 members = ["mctx-core-py"]
 
 [features]
 default = []
 metrics = ["dep:fs2", "dep:serde_json"]
+raw-ip = []
 raw-packets = []
 tokio = ["dep:tokio"]
 
