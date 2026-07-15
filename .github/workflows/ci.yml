@@ -25,8 +25,19 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Lint all targets and features
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Check raw-IP feature independently
+        run: cargo check --workspace --no-default-features --features raw-ip --tests
       - name: Run tests
         run: cargo test --workspace --all-features
+
+  msrv:
+    name: Rust 1.88 MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - name: Check all targets and features
+        run: cargo check --workspace --all-targets --all-features
 
   python:
     name: Python (${{ matrix.os }})
