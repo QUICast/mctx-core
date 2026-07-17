@@ -9,6 +9,7 @@ use pyo3::exceptions::{
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 use std::cell::RefCell;
+use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::rc::Rc;
 
@@ -124,10 +125,39 @@ fn opt_addr_to_tuple(addr: Option<SocketAddr>) -> Option<(String, u16)> {
     addr.map(addr_to_tuple)
 }
 
+fn addr_scope_id(addr: SocketAddr) -> Option<u32> {
+    match addr {
+        SocketAddr::V4(_) => None,
+        SocketAddr::V6(addr) => Some(addr.scope_id()),
+    }
+}
+
+fn opt_addr_scope_id(addr: Option<SocketAddr>) -> Option<u32> {
+    addr.and_then(addr_scope_id)
+}
+
 fn family_name(family: PublicationAddressFamily) -> &'static str {
     match family {
         PublicationAddressFamily::Ipv4 => "ipv4",
         PublicationAddressFamily::Ipv6 => "ipv6",
+    }
+}
+
+fn blocking_io_error(io_err: io::Error) -> PyErr {
+    let code = io_err.raw_os_error();
+    let message = io_err.to_string();
+    match code {
+        Some(code) => PyBlockingIOError::new_err((code, message)),
+        None => PyBlockingIOError::new_err(message),
+    }
+}
+
+fn os_error(io_err: io::Error) -> PyErr {
+    let code = io_err.raw_os_error();
+    let message = io_err.to_string();
+    match code {
+        Some(code) => PyOSError::new_err((code, message)),
+        None => PyOSError::new_err(message),
     }
 }
 
@@ -159,7 +189,7 @@ fn mctx_error_to_py(err: MctxError) -> PyErr {
         MctxError::SendFailed(io_err) | MctxError::RawSendFailed(io_err)
             if io_err.kind() == std::io::ErrorKind::WouldBlock =>
         {
-            PyBlockingIOError::new_err(io_err.to_string())
+            blocking_io_error(io_err)
         }
         MctxError::RawPacketTransmitUnsupported(_) => {
             PyNotImplementedError::new_err(err.to_string())
@@ -172,7 +202,7 @@ fn mctx_error_to_py(err: MctxError) -> PyErr {
         | MctxError::SendFailed(io_err)
         | MctxError::RawSocketCreateFailed(io_err)
         | MctxError::RawSocketBindFailed(io_err)
-        | MctxError::RawSendFailed(io_err) => PyOSError::new_err(io_err.to_string()),
+        | MctxError::RawSendFailed(io_err) => os_error(io_err),
     }
 }
 
@@ -422,11 +452,27 @@ impl PyPublication {
         })
     }
 
+    #[getter]
+    fn destination_scope_id(&self) -> PyResult<Option<u32>> {
+        with_publication(&self.shared, self.id, |publication| {
+            Ok(addr_scope_id(publication.destination()))
+        })
+    }
+
     fn local_addr(&self) -> PyResult<(String, u16)> {
         with_publication(&self.shared, self.id, |publication| {
             publication
                 .local_addr()
                 .map(addr_to_tuple)
+                .map_err(mctx_error_to_py)
+        })
+    }
+
+    fn local_scope_id(&self) -> PyResult<Option<u32>> {
+        with_publication(&self.shared, self.id, |publication| {
+            publication
+                .local_addr()
+                .map(addr_scope_id)
                 .map_err(mctx_error_to_py)
         })
     }
@@ -498,7 +544,9 @@ struct PySendReport {
     publication_id: u64,
     destination_addr: String,
     destination_port: u16,
+    destination_scope_id: Option<u32>,
     local_addr: Option<(String, u16)>,
+    local_scope_id: Option<u32>,
     source_addr: Option<String>,
     bytes_sent: usize,
 }
@@ -509,7 +557,9 @@ impl From<SendReport> for PySendReport {
             publication_id: report.publication_id.0,
             destination_addr: report.destination.ip().to_string(),
             destination_port: report.destination.port(),
+            destination_scope_id: addr_scope_id(report.destination),
             local_addr: opt_addr_to_tuple(report.local_addr),
+            local_scope_id: opt_addr_scope_id(report.local_addr),
             source_addr: report.source_addr.map(|ip| ip.to_string()),
             bytes_sent: report.bytes_sent,
         }
@@ -539,8 +589,18 @@ impl PySendReport {
     }
 
     #[getter]
+    fn destination_scope_id(&self) -> Option<u32> {
+        self.destination_scope_id
+    }
+
+    #[getter]
     fn local_addr(&self) -> Option<(String, u16)> {
         self.local_addr.clone()
+    }
+
+    #[getter]
+    fn local_scope_id(&self) -> Option<u32> {
+        self.local_scope_id
     }
 
     #[getter]
@@ -555,11 +615,13 @@ impl PySendReport {
 
     fn __repr__(&self) -> String {
         format!(
-            "SendReport(publication_id={}, destination=({}, {}), local_addr={:?}, source_addr={:?}, bytes_sent={})",
+            "SendReport(publication_id={}, destination=({}, {}), destination_scope_id={:?}, local_addr={:?}, local_scope_id={:?}, source_addr={:?}, bytes_sent={})",
             self.publication_id,
             self.destination_addr,
             self.destination_port,
+            self.destination_scope_id,
             self.local_addr,
+            self.local_scope_id,
             self.source_addr,
             self.bytes_sent,
         )

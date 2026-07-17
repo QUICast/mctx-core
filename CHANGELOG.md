@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Made Python asyncio sends safe when a publication is removed while waiting
+  for write readiness, including selector loops that never emit another event.
+- Preserved native OS error numbers on Python `OSError` and
+  `BlockingIOError` exceptions.
+
+### Added
+
+- Exposed IPv6 destination and local scope IDs through additive Python
+  publication/report properties without changing existing address tuples.
+- Added Python regressions for publication removal, unsupported writer
+  readiness, invalid polling intervals, and native error numbers.
+
+### Changed
+
+- Marked the PyO3 `cdylib` as non-testable by Cargo directly; installed-package
+  tests remain the authoritative binding runtime suite.
+- Extended binding CI to exercise both the declared Python 3.9 minimum and
+  Python 3.12 across Linux, macOS, and Windows.
+
 ## [0.3.0] - 2026-07-10
 
 ### Added

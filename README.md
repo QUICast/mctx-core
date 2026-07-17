@@ -40,6 +40,7 @@ cargo add mctx-core --features raw-ip
 
 Python bindings are covered in the [Python Bindings](docs/python.md) guide; the
 binding crate lives in the repository's `mctx-core-py` workspace directory.
+The repository does not currently ship a stable C ABI wrapper.
 
 ## Quick Start
 

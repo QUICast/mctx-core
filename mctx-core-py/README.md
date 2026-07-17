@@ -10,6 +10,10 @@ It provides:
 - `SendReport` for per-send results
 - `AsyncPublication` for await-style `asyncio` integration
 
+The bindings currently expose the normal UDP publication API. Metrics, raw
+packet/raw-IP transmit, caller-provided sockets, and bulk `send_all()` remain
+Rust-only APIs for now.
+
 ## Build
 
 Install from the repository root:
@@ -52,7 +56,16 @@ asyncio.run(main())
 ```
 
 `AsyncPublication` retries a non-blocking send when the socket reports
-`BlockingIOError`. On selector-based event loops it waits on writer readiness.
-On loops where that API is unavailable, such as the default Windows asyncio
-loop, it falls back to a thin async polling layer over the same non-blocking
-send call.
+`BlockingIOError`. On selector-based event loops it registers a duplicated
+publication descriptor and periodically rechecks publication lifetime. This
+prevents a removed publication from leaving a stale descriptor registration or
+hung send. On loops where writer readiness is unavailable, such as the default
+Windows asyncio loop, it falls back to a thin async polling layer over the same
+non-blocking send call.
+
+IPv6 `destination_scope_id` and `local_scope_id` values are exposed separately
+so the existing two-item address tuples remain stable.
+
+Generated extension modules and wheels are intentionally ignored by Git. Build
+a fresh wheel before distribution rather than reusing an artifact already in a
+working tree.
