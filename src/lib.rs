@@ -36,6 +36,11 @@ pub use raw::{
     RawContext, RawPublication, RawPublicationConfig, RawPublicationId, RawSendReport,
     RawValidationMode,
 };
+#[cfg(feature = "raw-route-egress")]
+pub use raw::{
+    RawEgressMode, RawRouteEgressCapabilities, RawRouteEgressCapability,
+    raw_route_egress_capabilities,
+};
 #[cfg(feature = "raw-ip")]
 pub use raw_ip::{
     RawIpCapabilities, RawIpCapability, RawIpContext, RawIpPublication, RawIpPublicationConfig,

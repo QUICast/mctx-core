@@ -11,6 +11,13 @@
 
 ### Added
 
+- Added optional `raw-route-egress` support for unbound, unconnected
+  route-selected raw IPv4 publications on Linux and macOS, including runtime
+  capability reporting.
+- Added transactional `RawContext::replace_publication`, which preserves the
+  publication ID and leaves the original publication untouched on failure.
+- Added an ignored privileged Linux two-veth test covering transient no-route
+  errors and route changes between sends through one publication.
 - Exposed IPv6 destination and local scope IDs through additive Python
   publication/report properties without changing existing address tuples.
 - Added Python regressions for publication removal, unsupported writer

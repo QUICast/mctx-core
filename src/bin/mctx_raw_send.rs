@@ -20,6 +20,7 @@ struct RawSendCliArgs {
     ttl: Option<u8>,
     loopback: bool,
     allow_any_destination: bool,
+    route_selected_egress: bool,
     quiet: bool,
 }
 
@@ -28,21 +29,36 @@ impl RawSendCliArgs {
         let mut config = match self.group {
             IpAddr::V4(_) => RawPublicationConfig::ipv4(),
             IpAddr::V6(_) => RawPublicationConfig::ipv6(),
-        }
-        .with_bind_addr(self.bind_addr.unwrap_or(self.source));
+        };
 
-        if let Some(interface) = self.interface {
-            config = match interface {
-                IpAddr::V4(interface) => config.with_outgoing_interface(interface),
-                IpAddr::V6(interface) => config.with_outgoing_interface(interface),
-            };
+        if self.route_selected_egress {
+            #[cfg(feature = "raw-route-egress")]
+            {
+                config = config.with_route_selected_egress();
+            }
+            #[cfg(not(feature = "raw-route-egress"))]
+            {
+                return Err(
+                    "--route-selected-egress requires the raw-route-egress Cargo feature"
+                        .to_string(),
+                );
+            }
+        } else {
+            config = config.with_bind_addr(self.bind_addr.unwrap_or(self.source));
+
+            if let Some(interface) = self.interface {
+                config = match interface {
+                    IpAddr::V4(interface) => config.with_outgoing_interface(interface),
+                    IpAddr::V6(interface) => config.with_outgoing_interface(interface),
+                };
+            }
+
+            if let Some(interface_index) = self.interface_index {
+                config = config.with_ipv6_interface_index(interface_index);
+            }
         }
 
-        if let Some(interface_index) = self.interface_index {
-            config = config.with_ipv6_interface_index(interface_index);
-        }
-
-        if let Some(ttl) = self.ttl {
+        if let Some(ttl) = self.ttl.filter(|_| !self.route_selected_egress) {
             config = config.with_ttl(ttl);
         }
 
@@ -147,6 +163,7 @@ fn parse_raw_send_cli_args(args: &[String]) -> Result<RawSendCliArgs, String> {
         ttl: None,
         loopback: true,
         allow_any_destination: false,
+        route_selected_egress: false,
         quiet: false,
     };
 
@@ -216,6 +233,10 @@ fn parse_raw_send_cli_args(args: &[String]) -> Result<RawSendCliArgs, String> {
                 parsed.allow_any_destination = true;
                 index += 1;
             }
+            "--route-selected-egress" => {
+                parsed.route_selected_egress = true;
+                index += 1;
+            }
             "--quiet" => {
                 parsed.quiet = true;
                 index += 1;
@@ -251,13 +272,28 @@ fn parse_raw_send_cli_args(args: &[String]) -> Result<RawSendCliArgs, String> {
         return Err("--interface-index is only valid for IPv6 raw send".to_string());
     }
 
+    if parsed.route_selected_egress {
+        if !matches!(parsed.group, IpAddr::V4(_)) {
+            return Err("--route-selected-egress currently supports IPv4 only".to_string());
+        }
+        if parsed.bind_addr.is_some()
+            || parsed.interface.is_some()
+            || parsed.interface_index.is_some()
+        {
+            return Err(
+                "--route-selected-egress cannot be combined with --bind, --interface, or --interface-index"
+                    .to_string(),
+            );
+        }
+    }
+
     Ok(parsed)
 }
 
 fn print_usage(program: &str) {
     eprintln!("Usage:");
     eprintln!(
-        "  {program} <group> <dst_port> <payload> [count] [interval_ms] --source <ip> [--bind <local-ip>] [--source-port <port>] [--interface <ip>] [--interface-index <idx>] [--ttl <ttl>] [--no-loopback] [--allow-any-destination] [--quiet]"
+        "  {program} <group> <dst_port> <payload> [count] [interval_ms] --source <ip> [--bind <local-ip>] [--source-port <port>] [--interface <ip>] [--interface-index <idx>] [--route-selected-egress] [--ttl <ttl>] [--no-loopback] [--allow-any-destination] [--quiet]"
     );
     eprintln!();
     eprintln!("Examples:");
@@ -266,6 +302,9 @@ fn print_usage(program: &str) {
     );
     eprintln!(
         "  {program} 232.1.2.3 5000 hello-ssm 5 100 --source 192.168.1.20 --source-port 4000"
+    );
+    eprintln!(
+        "  {program} 232.1.2.3 5000 hello-routed 5 100 --source 198.51.100.10 --source-port 4000 --route-selected-egress"
     );
     eprintln!(
         "  {program} ff31::8000:1234 5000 hello-v6 5 100 --source ::1 --source-port 4000 --interface ::1"
@@ -284,6 +323,9 @@ fn print_usage(program: &str) {
     eprintln!("  - --bind selects a distinct local egress address for remote-source forwarding");
     eprintln!("  - --source-port defaults to 4000");
     eprintln!("  - use --interface or --interface-index when you need to force egress selection");
+    eprintln!(
+        "  - --route-selected-egress leaves IPv4 unbound and follows the OS routing table (requires --features raw-route-egress)"
+    );
     eprintln!(
         "  - Linux and macOS support raw IPv4 and raw IPv6; Windows currently supports raw IPv4 only"
     );
@@ -542,6 +584,7 @@ mod tests {
             ttl: Some(4),
             loopback: true,
             allow_any_destination: false,
+            route_selected_egress: false,
             quiet: false,
         };
 
@@ -568,10 +611,53 @@ mod tests {
             ttl: Some(4),
             loopback: true,
             allow_any_destination: false,
+            route_selected_egress: false,
             quiet: true,
         };
 
         let config = parsed.build_config().unwrap();
         assert_eq!(config.bind_addr, Some(IpAddr::V6(Ipv6Addr::LOCALHOST)));
+    }
+
+    #[cfg(feature = "raw-route-egress")]
+    #[test]
+    fn route_selected_cli_config_does_not_bind_the_header_source() {
+        let args = vec![
+            "mctx_raw_send".to_string(),
+            "232.1.2.3".to_string(),
+            "5000".to_string(),
+            "hello".to_string(),
+            "--source".to_string(),
+            "198.51.100.10".to_string(),
+            "--route-selected-egress".to_string(),
+            "--ttl".to_string(),
+            "12".to_string(),
+        ];
+
+        let parsed = parse_raw_send_cli_args(&args).unwrap();
+        let config = parsed.build_config().unwrap();
+
+        assert_eq!(config.egress_mode, mctx_core::RawEgressMode::RouteSelected);
+        assert_eq!(config.bind_addr, None);
+        assert_eq!(config.outgoing_interface, None);
+        assert_eq!(config.ttl, None);
+    }
+
+    #[test]
+    fn route_selected_cli_rejects_explicit_selectors() {
+        let args = vec![
+            "mctx_raw_send".to_string(),
+            "232.1.2.3".to_string(),
+            "5000".to_string(),
+            "hello".to_string(),
+            "--source".to_string(),
+            "198.51.100.10".to_string(),
+            "--route-selected-egress".to_string(),
+            "--interface".to_string(),
+            "192.0.2.10".to_string(),
+        ];
+
+        let error = parse_raw_send_cli_args(&args).unwrap_err();
+        assert!(error.contains("cannot be combined"));
     }
 }

@@ -45,12 +45,11 @@ impl RawContext {
     fn ensure_publication_config_is_unique(
         &self,
         config: &RawPublicationConfig,
+        excluded_id: Option<RawPublicationId>,
     ) -> Result<(), MctxError> {
-        if self
-            .publications
-            .iter()
-            .any(|publication| publication.config() == config)
-        {
+        if self.publications.iter().any(|publication| {
+            Some(publication.id()) != excluded_id && publication.config() == config
+        }) {
             return Err(MctxError::DuplicatePublication);
         }
 
@@ -62,7 +61,7 @@ impl RawContext {
         &mut self,
         config: RawPublicationConfig,
     ) -> Result<RawPublicationId, MctxError> {
-        self.ensure_publication_config_is_unique(&config)?;
+        self.ensure_publication_config_is_unique(&config, None)?;
 
         let id = RawPublicationId(self.next_publication_id);
         self.next_publication_id += 1;
@@ -72,6 +71,29 @@ impl RawContext {
         self.publications.push(publication);
         self.publication_indices.insert(id, index);
         Ok(id)
+    }
+
+    /// Replaces one publication after fully initializing its new socket.
+    ///
+    /// The publication ID and context index are preserved. If validation,
+    /// duplicate detection, or socket initialization fails, the original
+    /// publication remains untouched and usable. Raw publications currently
+    /// have no built-in metrics counters; caller-side metrics keyed by the
+    /// stable ID can therefore continue across replacement.
+    pub fn replace_publication(
+        &mut self,
+        id: RawPublicationId,
+        config: RawPublicationConfig,
+    ) -> Result<(), MctxError> {
+        let index = *self
+            .publication_indices
+            .get(&id)
+            .ok_or(MctxError::PublicationNotFound)?;
+        self.ensure_publication_config_is_unique(&config, Some(id))?;
+
+        let replacement = RawPublication::new(id, config)?;
+        self.publications[index] = replacement;
+        Ok(())
     }
 
     /// Removes one raw publication and drops its socket.
@@ -150,6 +172,61 @@ mod tests {
         );
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn replacement_preserves_publication_id_and_count() {
+        let mut ctx = RawContext::new();
+        let id = ctx
+            .add_publication(RawPublicationConfig::ipv6().with_ipv6_interface_index(7))
+            .unwrap();
+
+        ctx.replace_publication(
+            id,
+            RawPublicationConfig::ipv6().with_ipv6_interface_index(8),
+        )
+        .unwrap();
+
+        let publication = ctx.get_publication(id).unwrap();
+        assert_eq!(publication.id(), id);
+        assert_eq!(
+            publication.config().outgoing_interface,
+            Some(crate::OutgoingInterface::Ipv6Index(8))
+        );
+        assert_eq!(ctx.publication_count(), 1);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn failed_replacement_leaves_original_publication_usable() {
+        let mut ctx = RawContext::new();
+        let original_config = RawPublicationConfig::ipv6().with_ipv6_interface_index(7);
+        let id = ctx.add_publication(original_config.clone()).unwrap();
+
+        let error = ctx
+            .replace_publication(id, RawPublicationConfig::ipv4())
+            .unwrap_err();
+
+        assert!(matches!(error, MctxError::RawInterfaceRequired));
+        let publication = ctx.get_publication(id).unwrap();
+        assert_eq!(publication.id(), id);
+        assert_eq!(publication.config(), &original_config);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn replacement_rejects_another_publications_config_transactionally() {
+        let mut ctx = RawContext::new();
+        let original_config = RawPublicationConfig::ipv6().with_ipv6_interface_index(7);
+        let duplicate_config = RawPublicationConfig::ipv6().with_ipv6_interface_index(8);
+        let id = ctx.add_publication(original_config.clone()).unwrap();
+        ctx.add_publication(duplicate_config.clone()).unwrap();
+
+        let error = ctx.replace_publication(id, duplicate_config).unwrap_err();
+
+        assert!(matches!(error, MctxError::DuplicatePublication));
+        assert_eq!(ctx.get_publication(id).unwrap().config(), &original_config);
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_raw_ipv6_support_is_explicitly_unsupported() {
@@ -159,6 +236,19 @@ mod tests {
             .add_publication(RawPublicationConfig::ipv6().with_ipv6_interface_index(7))
             .unwrap_err();
         assert!(matches!(err, MctxError::RawPacketTransmitUnsupported(_)));
+    }
+
+    #[cfg(all(windows, feature = "raw-route-egress"))]
+    #[test]
+    fn windows_route_selected_egress_is_explicitly_unsupported() {
+        let mut ctx = RawContext::new();
+
+        let err = ctx
+            .add_publication(RawPublicationConfig::ipv4().with_route_selected_egress())
+            .unwrap_err();
+
+        assert!(matches!(err, MctxError::RawPacketTransmitUnsupported(_)));
+        assert_eq!(ctx.publication_count(), 0);
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]

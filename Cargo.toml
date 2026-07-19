@@ -23,6 +23,7 @@ default = []
 metrics = ["dep:fs2", "dep:serde_json"]
 raw-ip = []
 raw-packets = []
+raw-route-egress = ["raw-packets"]
 tokio = ["dep:tokio"]
 
 [dependencies]

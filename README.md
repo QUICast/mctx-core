@@ -6,8 +6,8 @@ ASM/SSM-style traffic.
 The default API focuses on lightweight UDP multicast send with explicit socket
 ownership, deterministic source/interface control, and non-blocking operation.
 Optional features add Tokio integration, metrics, multicast raw-IP forwarding,
-generic raw-IP control transmit, and Python bindings without changing the
-default UDP send path.
+route-selected raw egress, generic raw-IP control transmit, and Python bindings
+without changing the default UDP send path.
 
 ## Highlights
 
@@ -18,7 +18,8 @@ default UDP send path.
   `ff38` / `ff3e`
 - Non-blocking send API with caller-owned context and socket extraction
 - Caller-provided socket support
-- Optional `tokio`, `metrics`, `raw-packets`, and `raw-ip` features
+- Optional `tokio`, `metrics`, `raw-packets`, `raw-route-egress`, and `raw-ip`
+  features
 - Optional Python bindings in the sibling `mctx-core-py` crate
 
 ## Install
@@ -35,6 +36,7 @@ Optional feature examples:
 cargo add mctx-core --features tokio
 cargo add mctx-core --features metrics
 cargo add mctx-core --features raw-packets
+cargo add mctx-core --features raw-route-egress
 cargo add mctx-core --features raw-ip
 ```
 
@@ -69,6 +71,8 @@ For IPv6 examples, source/interface rules, and CLI commands, see
 - `metrics`: snapshots, deltas, samplers, and Heimdall-style JSONL helpers.
 - `raw-packets`: complete multicast IP datagram transmit for AMT-style use
   cases.
+- `raw-route-egress`: adds kernel route-selected IPv4 egress to `raw-packets`
+  without changing its explicit-interface default.
 - `raw-ip`: complete unicast or multicast IP datagram transmit for caller-built
   control traffic such as ICMP Packet Too Big.
 - `mctx-core-py`: sibling workspace crate with Python and asyncio bindings.

@@ -15,6 +15,19 @@ pub enum RawValidationMode {
     AllowAnyDestination,
 }
 
+/// Selects how a raw publication chooses its network egress.
+///
+/// This type is available with the additive `raw-route-egress` feature.
+#[cfg(feature = "raw-route-egress")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum RawEgressMode {
+    /// Bind and pin egress using the configured local selectors.
+    #[default]
+    Explicit,
+    /// Leave IPv4 egress unbound so the operating system routes every send.
+    RouteSelected,
+}
+
 /// Configuration for one raw multicast transmit publication.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RawPublicationConfig {
@@ -36,6 +49,9 @@ pub struct RawPublicationConfig {
     pub loopback: Option<bool>,
     /// Validation behavior for outbound datagrams.
     pub validation_mode: RawValidationMode,
+    /// Egress-selection behavior. Existing configurations remain explicit.
+    #[cfg(feature = "raw-route-egress")]
+    pub egress_mode: RawEgressMode,
 }
 
 impl Default for RawPublicationConfig {
@@ -55,6 +71,8 @@ impl RawPublicationConfig {
             ttl: None,
             loopback: None,
             validation_mode: RawValidationMode::StrictMulticastDestination,
+            #[cfg(feature = "raw-route-egress")]
+            egress_mode: RawEgressMode::Explicit,
         }
     }
 
@@ -70,6 +88,11 @@ impl RawPublicationConfig {
 
     /// Validates the configuration and returns an error if it is not usable.
     pub fn validate(&self) -> Result<(), MctxError> {
+        #[cfg(feature = "raw-route-egress")]
+        if self.egress_mode == RawEgressMode::RouteSelected {
+            return self.validate_route_selected_egress();
+        }
+
         if self.bind_addr.is_none() && self.outgoing_interface.is_none() {
             return Err(MctxError::RawInterfaceRequired);
         }
@@ -127,6 +150,32 @@ impl RawPublicationConfig {
         Ok(())
     }
 
+    #[cfg(feature = "raw-route-egress")]
+    fn validate_route_selected_egress(&self) -> Result<(), MctxError> {
+        if self.bind_addr.is_some() || self.outgoing_interface.is_some() {
+            return Err(MctxError::RawPacketTransmitUnsupported(
+                "route-selected raw egress cannot be combined with bind_addr or outgoing_interface"
+                    .to_string(),
+            ));
+        }
+
+        if self.family != Some(PublicationAddressFamily::Ipv4) {
+            return Err(MctxError::RawPacketTransmitUnsupported(
+                "route-selected raw egress requires an explicitly configured IPv4 family"
+                    .to_string(),
+            ));
+        }
+
+        if self.ttl.is_some() {
+            return Err(MctxError::RawPacketTransmitUnsupported(
+                "route-selected raw egress preserves the supplied IPv4 TTL and cannot use a TTL override"
+                    .to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
     /// Pins the expected IP family for datagrams sent through this publication.
     pub fn with_family(mut self, family: PublicationAddressFamily) -> Self {
         self.family = Some(family);
@@ -175,6 +224,21 @@ impl RawPublicationConfig {
     pub fn with_validation_mode(mut self, validation_mode: RawValidationMode) -> Self {
         self.validation_mode = validation_mode;
         self
+    }
+
+    /// Lets the operating system choose IPv4 egress from its routing table.
+    ///
+    /// Route-selected mode rejects local bind/interface selectors and TTL
+    /// overrides. It is currently supported only for IPv4 on Linux and macOS.
+    #[cfg(feature = "raw-route-egress")]
+    pub fn with_route_selected_egress(mut self) -> Self {
+        self.egress_mode = RawEgressMode::RouteSelected;
+        self
+    }
+
+    #[cfg(feature = "raw-route-egress")]
+    pub(crate) fn uses_route_selected_egress(&self) -> bool {
+        self.egress_mode == RawEgressMode::RouteSelected
     }
 }
 
@@ -269,6 +333,65 @@ mod tests {
         assert!(matches!(
             RawPublicationConfig::ipv4().validate(),
             Err(MctxError::RawInterfaceRequired)
+        ));
+    }
+
+    #[cfg(feature = "raw-route-egress")]
+    #[test]
+    fn route_selected_ipv4_config_is_explicit_and_valid() {
+        let config = RawPublicationConfig::ipv4().with_route_selected_egress();
+
+        assert_eq!(config.egress_mode, RawEgressMode::RouteSelected);
+        assert!(config.validate().is_ok());
+    }
+
+    #[cfg(feature = "raw-route-egress")]
+    #[test]
+    fn explicit_mode_remains_the_default() {
+        let config = RawPublicationConfig::ipv4();
+
+        assert_eq!(config.egress_mode, RawEgressMode::Explicit);
+        assert!(matches!(
+            config.validate(),
+            Err(MctxError::RawInterfaceRequired)
+        ));
+    }
+
+    #[cfg(feature = "raw-route-egress")]
+    #[test]
+    fn route_selected_mode_rejects_explicit_selectors() {
+        let bind_config = RawPublicationConfig::ipv4()
+            .with_route_selected_egress()
+            .with_bind_addr(Ipv4Addr::LOCALHOST);
+        let interface_config = RawPublicationConfig::ipv4()
+            .with_route_selected_egress()
+            .with_outgoing_interface(Ipv4Addr::LOCALHOST);
+
+        assert!(matches!(
+            bind_config.validate(),
+            Err(MctxError::RawPacketTransmitUnsupported(_))
+        ));
+        assert!(matches!(
+            interface_config.validate(),
+            Err(MctxError::RawPacketTransmitUnsupported(_))
+        ));
+    }
+
+    #[cfg(feature = "raw-route-egress")]
+    #[test]
+    fn route_selected_mode_rejects_ipv6_and_ttl_overrides() {
+        let ipv6_config = RawPublicationConfig::ipv6().with_route_selected_egress();
+        let ttl_config = RawPublicationConfig::ipv4()
+            .with_route_selected_egress()
+            .with_ttl(8);
+
+        assert!(matches!(
+            ipv6_config.validate(),
+            Err(MctxError::RawPacketTransmitUnsupported(_))
+        ));
+        assert!(matches!(
+            ttl_config.validate(),
+            Err(MctxError::RawPacketTransmitUnsupported(_))
         ));
     }
 }

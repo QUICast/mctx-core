@@ -116,6 +116,11 @@ pub(crate) fn open_raw_transmit_socket(
 ) -> Result<RawTransmitSocket, MctxError> {
     config.validate()?;
 
+    #[cfg(feature = "raw-route-egress")]
+    if config.uses_route_selected_egress() {
+        return open_linux_route_selected_raw_socket_v4(config);
+    }
+
     match configured_socket_family(config) {
         Some(PublicationAddressFamily::Ipv4) => open_linux_raw_socket_v4(config),
         Some(PublicationAddressFamily::Ipv6) | None => open_linux_raw_socket_v6(config),
@@ -128,6 +133,11 @@ pub(crate) fn open_raw_transmit_socket(
 ) -> Result<RawTransmitSocket, MctxError> {
     config.validate()?;
 
+    #[cfg(feature = "raw-route-egress")]
+    if config.uses_route_selected_egress() {
+        return open_macos_route_selected_raw_socket_v4(config);
+    }
+
     match infer_socket_family(config)? {
         PublicationAddressFamily::Ipv4 => open_macos_raw_socket_v4(config),
         PublicationAddressFamily::Ipv6 => open_macos_raw_socket_v6(config),
@@ -139,6 +149,13 @@ pub(crate) fn open_raw_transmit_socket(
     config: &RawPublicationConfig,
 ) -> Result<RawTransmitSocket, MctxError> {
     config.validate()?;
+
+    #[cfg(feature = "raw-route-egress")]
+    if config.uses_route_selected_egress() {
+        return Err(MctxError::RawPacketTransmitUnsupported(
+            "route-selected raw egress is not supported on Windows".to_string(),
+        ));
+    }
 
     match infer_socket_family(config)? {
         PublicationAddressFamily::Ipv4 => open_windows_raw_socket_v4(config),
@@ -212,9 +229,10 @@ pub(crate) fn send_raw_ip_datagram(
                 IoSlice::new(&header[..header_len]),
                 IoSlice::new(&ip_datagram[header_len..]),
             ];
-            let bytes_sent = send_socket
-                .send_to_vectored(&buffers, &SockAddr::from(SocketAddrV4::new(group, 0)))
-                .map_err(MctxError::RawSendFailed)?;
+            let bytes_sent = preserve_raw_send_error(
+                send_socket
+                    .send_to_vectored(&buffers, &SockAddr::from(SocketAddrV4::new(group, 0))),
+            )?;
             if bytes_sent != ip_datagram.len() {
                 return Err(MctxError::RawSendFailed(std::io::Error::new(
                     std::io::ErrorKind::WriteZero,
@@ -267,12 +285,13 @@ fn send_linux_raw_ipv4_datagram(
         }
     };
 
-    let bytes_sent = socket
-        .socket
-        .as_ref()
-        .expect("linux raw IPv4 socket is opened during publication setup")
-        .send_to(datagram, &SockAddr::from(destination))
-        .map_err(MctxError::RawSendFailed)?;
+    let bytes_sent = preserve_raw_send_error(
+        socket
+            .socket
+            .as_ref()
+            .expect("linux raw IPv4 socket is opened during publication setup")
+            .send_to(datagram, &SockAddr::from(destination)),
+    )?;
 
     Ok(raw_send_report(
         socket,
@@ -336,9 +355,8 @@ pub(crate) fn send_raw_ip_datagram(
     let send_socket =
         cached_raw_ipv4_send_socket(socket, config.loopback, i32::from(parsed.protocol))?;
 
-    let bytes_sent = send_socket
-        .send_to(datagram, &SockAddr::from(destination))
-        .map_err(MctxError::RawSendFailed)?;
+    let bytes_sent =
+        preserve_raw_send_error(send_socket.send_to(datagram, &SockAddr::from(destination)))?;
 
     Ok(raw_send_report(
         socket,
@@ -393,6 +411,11 @@ fn validate_datagram_against_config(
     }
 
     Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
+fn preserve_raw_send_error<T>(result: std::io::Result<T>) -> Result<T, MctxError> {
+    result.map_err(MctxError::RawSendFailed)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
@@ -540,6 +563,43 @@ fn open_linux_raw_socket_v4(config: &RawPublicationConfig) -> Result<RawTransmit
     })
 }
 
+#[cfg(all(target_os = "linux", feature = "raw-route-egress"))]
+fn open_linux_route_selected_raw_socket_v4(
+    config: &RawPublicationConfig,
+) -> Result<RawTransmitSocket, MctxError> {
+    let socket = Socket::new(
+        Domain::IPV4,
+        Type::RAW,
+        Some(Protocol::from(libc::IPPROTO_RAW)),
+    )
+    .map_err(MctxError::RawSocketCreateFailed)?;
+
+    socket
+        .set_nonblocking(true)
+        .map_err(MctxError::SocketOptionFailed)?;
+    socket
+        .set_header_included_v4(true)
+        .map_err(MctxError::SocketOptionFailed)?;
+
+    if let Some(loopback) = config.loopback {
+        socket
+            .set_multicast_loop_v4(loopback)
+            .map_err(MctxError::SocketOptionFailed)?;
+    }
+
+    Ok(RawTransmitSocket {
+        socket: Some(socket),
+        #[cfg(any(target_os = "macos", windows))]
+        raw_ipv4_protocol_sockets: Mutex::new(BoundedSocketCache::default()),
+        unix_raw_ipv6_sockets: Mutex::new(BoundedSocketCache::default()),
+        linux_packet_ipv6_socket: Mutex::new(None),
+        family: PublicationAddressFamily::Ipv4,
+        interface_index: None,
+        local_bind_addr: None,
+        linux_backend: LinuxRawTransmitBackend::RawIpv4,
+    })
+}
+
 #[cfg(target_os = "linux")]
 fn open_linux_raw_socket_v6(config: &RawPublicationConfig) -> Result<RawTransmitSocket, MctxError> {
     let selection = resolve_raw_ipv6_selection(config)?;
@@ -560,7 +620,7 @@ fn open_linux_raw_socket_v6(config: &RawPublicationConfig) -> Result<RawTransmit
 fn open_macos_raw_socket_v4(config: &RawPublicationConfig) -> Result<RawTransmitSocket, MctxError> {
     let selection = resolve_raw_ipv4_selection(config)?;
     let probe_socket =
-        open_raw_ipv4_socket_with_protocol(selection, config.loopback, libc::IPPROTO_RAW)?;
+        open_raw_ipv4_socket_with_protocol(Some(selection), config.loopback, libc::IPPROTO_RAW)?;
     drop(probe_socket);
 
     Ok(RawTransmitSocket {
@@ -571,6 +631,26 @@ fn open_macos_raw_socket_v4(config: &RawPublicationConfig) -> Result<RawTransmit
         family: PublicationAddressFamily::Ipv4,
         interface_index: Some(selection.interface_index),
         local_bind_addr: Some(IpAddr::V4(selection.bind_addr)),
+        macos_backend: MacosRawTransmitBackend::RawIpv4,
+    })
+}
+
+#[cfg(all(target_os = "macos", feature = "raw-route-egress"))]
+fn open_macos_route_selected_raw_socket_v4(
+    config: &RawPublicationConfig,
+) -> Result<RawTransmitSocket, MctxError> {
+    let probe_socket =
+        open_raw_ipv4_socket_with_protocol(None, config.loopback, libc::IPPROTO_RAW)?;
+    drop(probe_socket);
+
+    Ok(RawTransmitSocket {
+        socket: None,
+        raw_ipv4_selection: None,
+        raw_ipv4_protocol_sockets: Mutex::new(BoundedSocketCache::default()),
+        unix_raw_ipv6_sockets: Mutex::new(BoundedSocketCache::default()),
+        family: PublicationAddressFamily::Ipv4,
+        interface_index: None,
+        local_bind_addr: None,
         macos_backend: MacosRawTransmitBackend::RawIpv4,
     })
 }
@@ -595,7 +675,8 @@ fn open_windows_raw_socket_v4(
     config: &RawPublicationConfig,
 ) -> Result<RawTransmitSocket, MctxError> {
     let selection = resolve_raw_ipv4_selection(config)?;
-    let probe_socket = open_raw_ipv4_socket_with_protocol(selection, config.loopback, IPPROTO_RAW)?;
+    let probe_socket =
+        open_raw_ipv4_socket_with_protocol(Some(selection), config.loopback, IPPROTO_RAW)?;
     drop(probe_socket);
 
     Ok(RawTransmitSocket {
@@ -610,7 +691,7 @@ fn open_windows_raw_socket_v4(
 
 #[cfg(any(target_os = "macos", windows))]
 fn open_raw_ipv4_socket_with_protocol(
-    selection: RawIpv4Selection,
+    selection: Option<RawIpv4Selection>,
     loopback: Option<bool>,
     protocol: i32,
 ) -> Result<Socket, MctxError> {
@@ -623,12 +704,14 @@ fn open_raw_ipv4_socket_with_protocol(
     socket
         .set_header_included_v4(true)
         .map_err(MctxError::SocketOptionFailed)?;
-    socket
-        .bind(&SockAddr::from(SocketAddrV4::new(selection.bind_addr, 0)))
-        .map_err(MctxError::RawSocketBindFailed)?;
-    socket
-        .set_multicast_if_v4(&selection.interface_addr)
-        .map_err(MctxError::SocketOptionFailed)?;
+    if let Some(selection) = selection {
+        socket
+            .bind(&SockAddr::from(SocketAddrV4::new(selection.bind_addr, 0)))
+            .map_err(MctxError::RawSocketBindFailed)?;
+        socket
+            .set_multicast_if_v4(&selection.interface_addr)
+            .map_err(MctxError::SocketOptionFailed)?;
+    }
 
     if let Some(loopback) = loopback {
         socket
@@ -797,9 +880,7 @@ fn cached_raw_ipv4_send_socket(
     loopback: Option<bool>,
     protocol: i32,
 ) -> Result<Arc<Socket>, MctxError> {
-    let selection = socket
-        .raw_ipv4_selection
-        .ok_or(MctxError::RawInterfaceRequired)?;
+    let selection = socket.raw_ipv4_selection;
     let mut cache = lock_recover(&socket.raw_ipv4_protocol_sockets);
     cache.get_or_try_insert_with(protocol, || {
         open_raw_ipv4_socket_with_protocol(selection, loopback, protocol)
@@ -903,9 +984,8 @@ fn send_unix_raw_ipv6_datagram(
     let destination_scope_id = ipv6_destination_scope_id(group, interface_index);
     let destination = SocketAddrV6::new(group, 0, 0, destination_scope_id);
 
-    let bytes_sent = send_socket
-        .send_to(payload, &SockAddr::from(destination))
-        .map_err(MctxError::RawSendFailed)?;
+    let bytes_sent =
+        preserve_raw_send_error(send_socket.send_to(payload, &SockAddr::from(destination)))?;
 
     if bytes_sent != payload.len() {
         return Err(MctxError::RawSendFailed(std::io::Error::new(
@@ -1059,6 +1139,22 @@ mod tests {
             .with_validation_mode(RawValidationMode::AllowAnyDestination);
 
         assert!(validate_datagram_against_config(parsed, &config).is_ok());
+    }
+
+    #[test]
+    fn transient_send_errors_preserve_their_kind_without_latching_state() {
+        let error = preserve_raw_send_error::<usize>(Err(std::io::Error::new(
+            std::io::ErrorKind::NetworkUnreachable,
+            "temporary route failure",
+        )))
+        .unwrap_err();
+
+        let MctxError::RawSendFailed(error) = error else {
+            panic!("unexpected raw send error variant");
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::NetworkUnreachable);
+        assert_eq!(error.to_string(), "temporary route failure");
+        assert_eq!(preserve_raw_send_error(Ok(42usize)).unwrap(), 42);
     }
 
     #[test]

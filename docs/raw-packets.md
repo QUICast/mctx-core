@@ -27,6 +27,15 @@ datagram onto the local network intact so receivers observe the original
 cargo add mctx-core --features raw-packets
 ```
 
+Route-selected raw IPv4 egress is a separate additive feature:
+
+```bash
+cargo add mctx-core --features raw-route-egress
+```
+
+`raw-route-egress` depends on `raw-packets`. Without it, the raw API and its
+explicit-interface requirement are unchanged.
+
 ## Raw API Types
 
 The feature adds a parallel transmit API:
@@ -35,6 +44,12 @@ The feature adds a parallel transmit API:
 - `RawContext`
 - `RawPublication`
 - `RawSendReport`
+
+With `raw-route-egress`, it also exports:
+
+- `RawEgressMode`
+- `RawRouteEgressCapability` and `RawRouteEgressCapabilities`
+- `raw_route_egress_capabilities()`
 
 Enabling `raw-packets` does not change the behavior of `Context`,
 `Publication`, `PublicationConfig`, or `SendReport`.
@@ -59,9 +74,27 @@ println!("group ip: {:?}", report.destination_ip);
 println!("ip protocol: {:?}", report.ip_protocol);
 ```
 
+Route-selected IPv4 example:
+
+```rust
+use mctx_core::{RawContext, RawPublicationConfig};
+
+let mut ctx = RawContext::new();
+let id = ctx.add_publication(
+    RawPublicationConfig::ipv4().with_route_selected_egress(),
+)?;
+
+// The original source belongs only to this complete caller-built header.
+// The unbound socket follows the OS route for the multicast destination.
+let report = ctx.send_raw(id, &ip_datagram)?;
+assert_eq!(report.local_bind_addr, None);
+assert_eq!(report.outgoing_interface_index, None);
+# Ok::<(), mctx_core::MctxError>(())
+```
+
 ## Raw Config Semantics
 
-`RawPublicationConfig` keeps interface selection explicit:
+`RawPublicationConfig` uses explicit egress by default:
 
 - `family`: optional fixed IPv4 or IPv6 family, otherwise inferred from the
   local bind or interface selector at publication creation
@@ -71,6 +104,8 @@ println!("ip protocol: {:?}", report.ip_protocol);
 - `ttl`: optional TTL or hop-limit override applied directly to the IP header
 - `loopback`: optional loopback preference
 - `validation_mode`: strict multicast-destination validation by default
+- `egress_mode`: `Explicit` by default; `RouteSelected` is available only with
+  `raw-route-egress`
 
 Important distinction:
 
@@ -86,6 +121,60 @@ Important distinction:
   error because no link-layer transmit backend is currently provided
 
 The raw path never silently falls back to ordinary UDP payload send.
+
+## Route-Selected IPv4 Egress
+
+`RawPublicationConfig::ipv4().with_route_selected_egress()` creates an
+unbound, unconnected raw IPv4 publication on supported platforms. It does not
+bind a local address, set a multicast interface, retain an interface index, or
+monitor network interfaces itself. Every call uses `send_to`, leaving the OS
+routing table and its normal route cache responsible for choosing egress.
+Route invalidation or replacement can therefore affect a later send without
+replacing the publication.
+
+Route-selected mode:
+
+- requires `family = IPv4`
+- requires `bind_addr` and `outgoing_interface` to be absent
+- rejects a configured TTL override so the supplied header TTL is retained
+- allows `loopback` socket policy and normal multicast-destination validation
+- returns `RawPacketTransmitUnsupported` for IPv6, Windows, and unsupported
+  platforms
+
+The socket remains usable after a failed send. Routing and temporary network
+errors are returned as `MctxError::RawSendFailed` containing the original
+`io::Error`, including its native error number and `ErrorKind`; callers may
+retry the same publication after network state changes.
+
+Linux transmits through an unbound `IP_HDRINCL` socket. Linux documents that it
+fills the IPv4 total length and checksum and fills a zero identification field;
+nonzero source, destination, TTL, DSCP/ECN, and identification values remain
+caller-controlled. macOS requires its BSD host-order `ip_len`/`ip_off`
+conversion and computes the IPv4 header checksum, while preserving the other
+supplied fields. These are OS raw-socket semantics, not mctx rewrites.
+
+Use runtime capability reporting before selecting this mode:
+
+```rust
+use mctx_core::{RawRouteEgressCapability, raw_route_egress_capabilities};
+
+let capabilities = raw_route_egress_capabilities();
+if capabilities.ipv4 == RawRouteEgressCapability::KernelRouteSelected {
+    // Route-selected IPv4 is available in this build on this platform.
+}
+```
+
+## Transactional Replacement
+
+`RawContext::replace_publication(id, config)` validates duplicate state and
+fully initializes the replacement socket before swapping it into the context.
+Success preserves `RawPublicationId`; failure leaves the old publication
+untouched and usable. Replacing with another publication's config still returns
+`DuplicatePublication`.
+
+Raw publications currently have no built-in metrics counters, so there are no
+internal totals to reset or migrate. Caller-side metrics keyed by the stable
+publication ID can continue across replacement.
 
 ## Test Harness
 
@@ -116,6 +205,21 @@ The `--source` flag is required because it becomes the source IP encoded into
 the raw IP header. It is also used as the default local bind address. Use
 `--bind <local-ip>` when forwarding a datagram whose original source is remote.
 `--interface` or `--interface-index` independently selects egress.
+
+Route-selected IPv4 example:
+
+```bash
+cargo run --features raw-route-egress --bin mctx_raw_send -- \
+  232.1.2.3 5000 hello-routed 5 100 \
+  --source 198.51.100.10 \
+  --source-port 4000 \
+  --route-selected-egress
+```
+
+Here `--source` is encoded only into the complete IP header. It is not used as
+a local bind. `--bind`, `--interface`, and `--interface-index` conflict with
+`--route-selected-egress`. `--ttl` is encoded into the generated header rather
+than configured as an mctx override.
 
 ## Receiver Pairings
 
@@ -204,14 +308,17 @@ local receive path.
 
 ## Platform Support
 
-Current first-pass support:
+| Platform | Explicit IPv4 | Explicit IPv6 | Route-selected IPv4 | Route-selected IPv6 |
+|----------|---------------|---------------|---------------------|---------------------|
+| Linux | Supported | Supported | `KernelRouteSelected` | `Unsupported` |
+| macOS | Supported | Supported with local source | `KernelRouteSelected` | `Unsupported` |
+| Windows | Supported | Unsupported | `Unsupported` | `Unsupported` |
+| Other | Unsupported | Unsupported | `Unsupported` | `Unsupported` |
 
-- Linux: IPv4 via `IP_HDRINCL`; matching local-source IPv6 via raw IPv6 sockets;
-  remote-source IPv6 via an Ethernet packet socket
-- macOS: IPv4 via `IP_HDRINCL` raw sockets, IPv6 via raw IPv6 sockets with a
-  kernel-built base IPv6 header
-- Windows: implemented for IPv4 with raw sockets
-- other platforms: explicit unsupported error
+The route-selected columns describe
+`raw_route_egress_capabilities()`. Windows remains unsupported because this
+release does not claim faithful route-selected source/header preservation
+through its constrained raw IPv4 stack.
 
 ### Observed IPv4 ASM Behavior
 
@@ -248,6 +355,7 @@ Practical notes:
   `loopback = true` returns an unsupported error
 - explicit loopback control is supported for the IPv4 and IPv6 raw-socket paths
 - non-multicast raw transmit is not currently implemented
+- route-selected IPv4 is unbound and does not set `IP_MULTICAST_IF`
 
 ### macOS
 
@@ -269,6 +377,8 @@ Practical notes:
   accepting a caller-supplied full IPv6 header byte-for-byte
 - a distinct remote IPv6 source returns `RawPacketTransmitUnsupported` rather
   than silently sending with a rewritten source
+- route-selected IPv4 is unbound and does not set `IP_BOUND_IF` or
+  `IP_MULTICAST_IF`
 
 ### Windows
 
@@ -284,6 +394,8 @@ Practical notes:
   backend; prefer a second host or packet capture
 - IPv6 full-header transmit is not currently implemented and returns
   `MctxError::RawPacketTransmitUnsupported(...)`
+- route-selected raw egress is not claimed and returns the same typed
+  unsupported error
 
 ## Ignored Privileged Smoke Tests
 
@@ -310,6 +422,18 @@ $env:MCTX_RAW_TEST_SOURCE_V4="192.168.1.20"
 cargo test --features raw-packets raw::context::tests::windows_raw_ipv4_send_report_smoke_test -- --ignored --exact --nocapture
 ```
 
+Linux route-change namespace test:
+
+```bash
+sudo cargo test --features raw-route-egress \
+  --test raw_route_egress_linux_namespace \
+  -- --ignored --exact --nocapture
+```
+
+This requires `iproute2`, `CAP_NET_ADMIN`, and `CAP_NET_RAW`. It uses two veth
+paths, starts with an unreachable multicast route, and then moves the route
+between interfaces while retaining one publication ID.
+
 ## Validation Rules
 
 The raw path validates:
@@ -319,7 +443,9 @@ The raw path validates:
 - the destination must be multicast in strict mode
 - the configured family, if fixed, must match the datagram family
 - `bind_addr` and `outgoing_interface` must match the datagram family
-- raw packet transmit requires an explicit interface selector
+- explicit mode requires a local bind or interface selector
+- route-selected mode requires explicit IPv4 family and no bind/interface
+  selector or TTL override
 
 ## AMT / SSM Note
 

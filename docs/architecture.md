@@ -19,3 +19,5 @@ Design choices:
   are opt-in
 - `raw-packets` owns multicast forwarding semantics, while `raw-ip` is a
   separate caller-built IP datagram transport primitive for control traffic
+- `raw-route-egress` extends only `raw-packets`; it keeps raw sockets
+  unconnected and delegates IPv4 egress selection to the OS routing table
