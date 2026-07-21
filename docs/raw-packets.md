@@ -1,459 +1,349 @@
 # Raw Packet Transmit
 
-`mctx-core` can optionally inject complete multicast IP datagrams instead of
-just UDP payloads.
+The optional `raw-packets` API injects complete multicast IP datagrams. It is
+intended for AMT-style forwarding and other cases where receivers must observe
+the original `(source, group)` tuple.
 
-This support is gated behind the `raw-packets` Cargo feature so ordinary UDP
-users do not pay for extra API surface, platform checks, or privileged socket
-requirements.
+This API is separate from ordinary UDP publications:
 
-## Why It Exists
+- `Publication::send()` accepts a UDP payload and lets the kernel build IP/UDP
+  headers.
+- `RawPublication::send_raw()` accepts a complete IPv4 or IPv6 multicast
+  datagram, including the caller-supplied IP header.
+- The API never falls back to UDP when raw transmission is unavailable.
 
-The default send path is UDP-centric:
+The AMT or QUIC address family carrying a datagram is the **outer transport**.
+`RawPublicationConfig::family` describes only the **inner multicast IP
+datagram** supplied to `send_raw()`.
 
-- `PublicationConfig` targets a multicast group and UDP destination port
-- `Publication::send()` transmits only the UDP payload bytes
-- the kernel supplies the effective socket source address and source port
+## Features
 
-That is the right shape for ordinary multicast applications. It is not enough
-for AMT and RFC 7450 gateway forwarding, where the Multicast Data message
-contains the original multicast IP datagram and the gateway must inject that
-datagram onto the local network intact so receivers observe the original
-`(source, group)` tuple.
-
-## Feature Enablement
+Enable explicit-interface raw multicast transmission with:
 
 ```bash
 cargo add mctx-core --features raw-packets
 ```
 
-Route-selected raw IPv4 egress is a separate additive feature:
+Enable route-selected egress in addition to the explicit API with:
 
 ```bash
 cargo add mctx-core --features raw-route-egress
 ```
 
-`raw-route-egress` depends on `raw-packets`. Without it, the raw API and its
-explicit-interface requirement are unchanged.
+`raw-route-egress` depends on `raw-packets`. Explicit egress remains the
+default, and neither feature changes the UDP API.
 
-## Raw API Types
+## API
 
-The feature adds a parallel transmit API:
+`raw-packets` exports:
 
 - `RawPublicationConfig`
 - `RawContext`
 - `RawPublication`
+- `RawPublicationId`
 - `RawSendReport`
+- `RawIpv6EgressCapability` and `RawIpv6EgressCapabilities`
+- `raw_ipv6_egress_capabilities()`
 
-With `raw-route-egress`, it also exports:
+`raw-route-egress` additionally exports:
 
 - `RawEgressMode`
 - `RawRouteEgressCapability` and `RawRouteEgressCapabilities`
 - `raw_route_egress_capabilities()`
 
-Enabling `raw-packets` does not change the behavior of `Context`,
-`Publication`, `PublicationConfig`, or `SendReport`.
+## Capability Reporting
 
-## Example
-
-```rust
-use mctx_core::{RawContext, RawPublicationConfig};
-use std::net::Ipv4Addr;
-
-let mut ctx = RawContext::new();
-let id = ctx.add_publication(
-    RawPublicationConfig::ipv4().with_bind_addr(Ipv4Addr::new(192, 168, 1, 20)),
-)?;
-
-// `ip_datagram` must contain a complete IPv4 or IPv6 datagram, including
-// its original IP header.
-let report = ctx.send_raw(id, &ip_datagram)?;
-println!("sent {} raw bytes", report.bytes_sent);
-println!("source ip: {:?}", report.source_ip);
-println!("group ip: {:?}", report.destination_ip);
-println!("ip protocol: {:?}", report.ip_protocol);
-```
-
-Route-selected IPv4 example:
+Query capabilities before choosing an IPv6 mode:
 
 ```rust
-use mctx_core::{RawContext, RawPublicationConfig};
+use mctx_core::{RawIpv6EgressCapability, raw_ipv6_egress_capabilities};
 
-let mut ctx = RawContext::new();
-let id = ctx.add_publication(
-    RawPublicationConfig::ipv4().with_route_selected_egress(),
-)?;
-
-// The original source belongs only to this complete caller-built header.
-// The unbound socket follows the OS route for the multicast destination.
-let report = ctx.send_raw(id, &ip_datagram)?;
-assert_eq!(report.local_bind_addr, None);
-assert_eq!(report.outgoing_interface_index, None);
-# Ok::<(), mctx_core::MctxError>(())
-```
-
-## Raw Config Semantics
-
-`RawPublicationConfig` uses explicit egress by default:
-
-- `family`: optional fixed IPv4 or IPv6 family, otherwise inferred from the
-  local bind or interface selector at publication creation
-- `bind_addr`: local IP used to select and validate the egress interface
-- `outgoing_interface`: explicit interface selection by IPv4/IPv6 local address
-  or IPv6 interface index
-- `ttl`: optional TTL or hop-limit override applied directly to the IP header
-- `loopback`: optional loopback preference
-- `validation_mode`: strict multicast-destination validation by default
-- `egress_mode`: `Explicit` by default; `RouteSelected` is available only with
-  `raw-route-egress`
-
-Important distinction:
-
-- the caller-supplied datagram header carries the source IP that receivers will
-  observe
-- `bind_addr` and `outgoing_interface` only select where the datagram is
-  emitted
-- a matching IPv6 `bind_addr` selects the host-stack raw socket, which supports
-  same-host receive
-- on Linux, a distinct datagram source selects packet-socket injection and
-  preserves the complete IPv6 header for remote-source forwarding
-- on macOS, a distinct IPv6 datagram source returns an explicit unsupported
-  error because no link-layer transmit backend is currently provided
-
-The raw path never silently falls back to ordinary UDP payload send.
-
-## Route-Selected IPv4 Egress
-
-`RawPublicationConfig::ipv4().with_route_selected_egress()` creates an
-unbound, unconnected raw IPv4 publication on supported platforms. It does not
-bind a local address, set a multicast interface, retain an interface index, or
-monitor network interfaces itself. Every call uses `send_to`, leaving the OS
-routing table and its normal route cache responsible for choosing egress.
-Route invalidation or replacement can therefore affect a later send without
-replacing the publication.
-
-Route-selected mode:
-
-- requires `family = IPv4`
-- requires `bind_addr` and `outgoing_interface` to be absent
-- rejects a configured TTL override so the supplied header TTL is retained
-- allows `loopback` socket policy and normal multicast-destination validation
-- returns `RawPacketTransmitUnsupported` for IPv6, Windows, and unsupported
-  platforms
-
-The socket remains usable after a failed send. Routing and temporary network
-errors are returned as `MctxError::RawSendFailed` containing the original
-`io::Error`, including its native error number and `ErrorKind`; callers may
-retry the same publication after network state changes.
-
-Linux transmits through an unbound `IP_HDRINCL` socket. Linux documents that it
-fills the IPv4 total length and checksum and fills a zero identification field;
-nonzero source, destination, TTL, DSCP/ECN, and identification values remain
-caller-controlled. macOS requires its BSD host-order `ip_len`/`ip_off`
-conversion and computes the IPv4 header checksum, while preserving the other
-supplied fields. These are OS raw-socket semantics, not mctx rewrites.
-
-Use runtime capability reporting before selecting this mode:
-
-```rust
-use mctx_core::{RawRouteEgressCapability, raw_route_egress_capabilities};
-
-let capabilities = raw_route_egress_capabilities();
-if capabilities.ipv4 == RawRouteEgressCapability::KernelRouteSelected {
-    // Route-selected IPv4 is available in this build on this platform.
+let capabilities = raw_ipv6_egress_capabilities();
+if capabilities.explicit_interface
+    == RawIpv6EgressCapability::ExplicitInterfaceFullHeader
+{
+    // Arbitrary source and complete-header IPv6 forwarding is available.
 }
 ```
 
+The IPv6 capability levels are:
+
+- `Unsupported`: no faithful IPv6 backend is compiled for this mode.
+- `LocalSourceOnly`: only a locally assigned source can be transmitted; the
+  kernel may build the base header.
+- `ExplicitInterfaceFullHeader`: explicit-interface transmission preserves the
+  complete supplied IPv6 datagram and arbitrary source.
+- `RouteSelectedFullHeader`: route-selected transmission preserves the complete
+  supplied IPv6 datagram and arbitrary source.
+
+`raw_ipv6_egress_capabilities().route_selected` reports `Unsupported` unless
+the crate was built with `raw-route-egress`, even on Linux.
+
+## Explicit Egress
+
+Explicit mode requires `bind_addr`, `outgoing_interface`, or both:
+
+```rust
+use mctx_core::{RawContext, RawPublicationConfig};
+use std::net::Ipv6Addr;
+
+let local_egress: Ipv6Addr = "fd00::20".parse()?;
+let mut context = RawContext::new();
+let id = context.add_publication(
+    RawPublicationConfig::ipv6()
+        .with_bind_addr(local_egress)
+        .with_outgoing_interface(local_egress)
+        .with_loopback(false),
+)?;
+
+// This can carry a remote source. local_egress only selects the interface.
+let report = context.send_raw(id, &complete_multicast_ipv6_datagram)?;
+assert_eq!(report.bytes_sent, complete_multicast_ipv6_datagram.len());
+# Ok::<(), mctx_core::MctxError>(())
+```
+
+For raw IPv6:
+
+- The source observed by receivers always comes from the supplied IP header.
+- `bind_addr` is a local address used to resolve and validate egress; it is not
+  substituted into the datagram.
+- `outgoing_interface` independently identifies the egress interface by local
+  address or IPv6 interface index.
+- A local header source and a remote header source use the same full-header
+  link-layer backend on supported platforms.
+- A configured hop-limit override may equal the supplied header value. A
+  conflicting override returns `RawPacketTransmitUnsupported` rather than
+  changing or ignoring the header.
+
+The IPv6 bytes sent by the Linux and macOS full-header backends retain the
+source, destination, traffic class/ECN, flow label, hop limit, extension and
+fragmentation headers, and transport payload/checksum.
+
+## Route-Selected Egress
+
+Route-selected mode must not include explicit selectors:
+
+```rust
+use mctx_core::{RawContext, RawPublicationConfig};
+
+let mut context = RawContext::new();
+let id = context.add_publication(
+    RawPublicationConfig::ipv6()
+        .with_route_selected_egress()
+        .with_loopback(false),
+)?;
+
+let report = context.send_raw(id, &complete_multicast_ipv6_datagram)?;
+assert!(report.outgoing_interface_index.is_some());
+# Ok::<(), mctx_core::MctxError>(())
+```
+
+Route-selected configuration:
+
+- requires an explicit inner family (`ipv4()` or `ipv6()`)
+- requires `bind_addr` and `outgoing_interface` to be absent
+- rejects TTL/hop-limit overrides
+- remains unconnected and does not pin a local source
+- preserves the supplied source rather than deriving it from routing state
+
+Linux route-selected IPv6 reads the kernel's IPv6 `main` routing table and
+chooses the longest matching prefix, then the lowest route priority. The
+automatic per-interface `local ff00::/8` entries are intentionally excluded;
+otherwise a destination-only lookup can select an arbitrary interface.
+`RTMGRP_IPV6_ROUTE` and link notifications invalidate the cached destination,
+interface, and AF_PACKET socket. Route scanning and socket creation therefore
+happen after invalidation or a destination change, not for every packet.
+
+This backend follows the kernel `main` table; it does not implement policy-rule,
+VRF, or non-main-table selection. Use explicit mode plus
+`RawContext::replace_publication()` when those routing domains must be selected
+by the application.
+
+Interface-local and link-local IPv6 multicast (`ff31::/16` and `ff32::/16`)
+cannot be route-selected because their scope requires an unambiguous
+interface. They return `Ipv6ScopedMulticastRequiresInterface`; use explicit
+egress instead.
+
+Temporary route or interface failures return `MctxError::RawSendFailed` with
+the original `io::Error`, native error number, and `ErrorKind`. They do not
+poison the publication. A later send re-resolves routing and can recover.
+
 ## Transactional Replacement
 
-`RawContext::replace_publication(id, config)` validates duplicate state and
-fully initializes the replacement socket before swapping it into the context.
-Success preserves `RawPublicationId`; failure leaves the old publication
-untouched and usable. Replacing with another publication's config still returns
-`DuplicatePublication`.
+`RawContext::replace_publication(id, config)` performs duplicate checking and
+initializes the replacement before swapping it into the context. On success it
+preserves `RawPublicationId`; on failure the original publication remains
+untouched and usable.
 
-Raw publications currently have no built-in metrics counters, so there are no
-internal totals to reset or migrate. Caller-side metrics keyed by the stable
-publication ID can continue across replacement.
+Raw publications currently have no built-in metric counters. Caller metrics
+keyed by the stable publication ID can therefore continue across replacement.
+Destination-dependent Linux route and link-layer initialization remains lazy
+because the publication config does not contain a multicast destination;
+send-time failures remain recoverable.
 
-## Test Harness
-
-The repo includes a small convenience sender binary:
-
-```bash
-cargo run --features raw-packets --bin mctx_raw_send -- <group> <dst_port> <payload> [count] [interval_ms] --source <ip> [--bind <local-ip>] [--source-port <port>] [--interface <ip>] [--interface-index <idx>] [--ttl <ttl>] [--no-loopback] [--quiet]
-```
-
-It builds a complete UDP-in-IP datagram and sends it through the raw API.
-
-That makes it useful for validation with ordinary multicast UDP receivers such
-as `mcrx_recv_meta`.
-
-For matching local IPv6 sources, Linux and macOS use raw IPv6 sockets so the
-local host stack can observe same-host multicast in practical UDP-in-IP tests.
-Linux switches to link-layer injection when the supplied source is remote;
-macOS reports that case as unsupported. Windows raw IPv6 transmit is not
-implemented.
-
-Example:
-
-```bash
-cargo run --features raw-packets --bin mctx_raw_send -- 239.255.12.34 5000 hello-raw 5 100 --source 192.168.1.20 --source-port 4000
-```
-
-The `--source` flag is required because it becomes the source IP encoded into
-the raw IP header. It is also used as the default local bind address. Use
-`--bind <local-ip>` when forwarding a datagram whose original source is remote.
-`--interface` or `--interface-index` independently selects egress.
-
-Route-selected IPv4 example:
-
-```bash
-cargo run --features raw-route-egress --bin mctx_raw_send -- \
-  232.1.2.3 5000 hello-routed 5 100 \
-  --source 198.51.100.10 \
-  --source-port 4000 \
-  --route-selected-egress
-```
-
-Here `--source` is encoded only into the complete IP header. It is not used as
-a local bind. `--bind`, `--interface`, and `--interface-index` conflict with
-`--route-selected-egress`. `--ttl` is encoded into the generated header rather
-than configured as an mctx override.
-
-## Receiver Pairings
-
-IPv4 ASM test with `mcrx-core`:
-
-macOS same-host:
-
-```bash
-# receiver
-cargo run --bin mcrx_recv_meta -- 239.255.12.34 5000
-
-# sender
-cargo run --features raw-packets --bin mctx_raw_send -- 239.255.12.34 5000 hello-raw 5 100 --source 192.168.1.20 --source-port 4000
-```
-
-Linux or Windows cross-host:
-
-```bash
-# receiver on another machine
-cargo run --bin mcrx_recv_meta -- 239.255.12.34 5000
-
-# sender
-cargo run --features raw-packets --bin mctx_raw_send -- 239.255.12.34 5000 hello-raw 5 100 --source 192.168.1.20 --source-port 4000 --interface 192.168.1.20 --ttl 16
-```
-
-IPv4 SSM test with `mcrx-core`:
-
-macOS same-host or cross-host:
-
-```bash
-# receiver
-cargo run --bin mcrx_recv_meta -- 232.1.2.3 5000 --source 192.168.1.20
-
-# sender
-cargo run --features raw-packets --bin mctx_raw_send -- 232.1.2.3 5000 hello-ssm 5 100 --source 192.168.1.20 --source-port 4000
-```
-
-Linux or Windows should prefer a second machine or packet capture for raw-send
-validation.
-
-IPv6 same-host SSM-style smoke test on Linux or macOS:
-
-```bash
-# receiver
-cargo run --bin mcrx_recv_meta -- ff31::8000:1234 5000 --source ::1 --interface ::1
-
-# sender
-cargo run --features raw-packets --bin mctx_raw_send -- ff31::8000:1234 5000 hello-v6 5 100 --source ::1 --source-port 4000 --interface ::1
-```
-
-IPv6 cross-machine SSM-style test on Linux or macOS:
-
-```bash
-# receiver
-cargo run --bin mcrx_recv_meta -- ff3e::8000:1234 5000 --source <sender-ipv6> --interface <receiver-ipv6-or-ifindex>
-
-# sender
-cargo run --features raw-packets --bin mctx_raw_send -- ff3e::8000:1234 5000 hello-v6 5 100 --source <sender-ipv6> --source-port 4000 --interface <sender-ipv6>
-```
-
-Linux AMT-style forwarding with an original remote source uses a distinct local
-bind and the packet-socket backend:
-
-```bash
-cargo run --features raw-packets --bin mctx_raw_send -- ff3e::8000:1234 5000 hello-v6 5 100 \
-  --source <original-remote-source> \
-  --bind <local-egress-ipv6> \
-  --interface <local-egress-ipv6>
-```
-
-The packet is expected on the network and is not reinjected into the sender's
-local receive path.
-
-## Raw Send Report
-
-`RawSendReport` includes:
-
-- `publication_id`
-- parsed `source_ip`
-- parsed `destination_ip`
-- parsed `ip_protocol`
-- `bytes_sent`
-- `local_bind_addr`
-- `outgoing_interface`
-- `outgoing_interface_index`
-
-## Platform Support
+## Platform Matrix
 
 | Platform | Explicit IPv4 | Explicit IPv6 | Route-selected IPv4 | Route-selected IPv6 |
 |----------|---------------|---------------|---------------------|---------------------|
-| Linux | Supported | Supported | `KernelRouteSelected` | `Unsupported` |
-| macOS | Supported | Supported with local source | `KernelRouteSelected` | `Unsupported` |
-| Windows | Supported | Unsupported | `Unsupported` | `Unsupported` |
-| Other | Unsupported | Unsupported | `Unsupported` | `Unsupported` |
-
-The route-selected columns describe
-`raw_route_egress_capabilities()`. Windows remains unsupported because this
-release does not claim faithful route-selected source/header preservation
-through its constrained raw IPv4 stack.
-
-### Observed IPv4 ASM Behavior
-
-For the current `raw-packets` backend, the following IPv4 ASM behavior has been
-observed with `mctx_raw_send` as sender and `mcrx-core` receivers:
-
-| Sender  | macOS receiver | Windows receiver | Linux receiver |
-|---------|----------------|------------------|----------------|
-| macOS   | Seen           | Seen             | Seen           |
-| Windows | Seen           | Seen             | Seen           |
-| Linux   | Seen           | Seen             | Seen           |
-
-This matrix is specifically about IPv4 ASM testing so far. At the moment all
-three sender platforms have been observed to reach all three receivers.
+| Linux | Raw socket | Full header, AF_PACKET/Ethernet | Supported | Full header, AF_PACKET/Ethernet |
+| macOS | Raw socket | Full header, BPF/Ethernet | Supported | Unsupported |
+| Windows | Raw socket | Unsupported | Unsupported | Unsupported |
+| iOS | Unsupported | Unsupported | Unsupported | Unsupported |
+| Android | Unsupported | Unsupported | Unsupported | Unsupported |
+| Other | Unsupported | Unsupported | Unsupported | Unsupported |
 
 ### Linux
 
-The current implementation uses raw IP sockets for IPv4 and local-source IPv6.
-Remote-source IPv6 uses a packet socket so the complete supplied header can be
-injected without requiring the original source to exist locally.
-
-Practical notes:
-
-- raw packet transmit usually requires `CAP_NET_RAW` or root
-- the caller-supplied IPv4 header is transmitted with `IP_HDRINCL`
-- when the datagram source matches `bind_addr`, Linux rebuilds the base IPv6
-  header from the source, destination, next-header, and hop limit; this keeps
-  same-host multicast delivery working
-- when the datagram source differs, Linux uses packet-socket injection and
-  preserves the complete IPv6 datagram for AMT/SSM forwarding
-- packet-socket injection requires an Ethernet-like interface and does not feed
-  the transmitted packet back through the local IP receive path
-- packet-socket injection cannot enable local loopback; an explicit
-  `loopback = true` returns an unsupported error
-- explicit loopback control is supported for the IPv4 and IPv6 raw-socket paths
-- non-multicast raw transmit is not currently implemented
-- route-selected IPv4 is unbound and does not set `IP_MULTICAST_IF`
+- IPv6 explicit and route-selected sends use `AF_PACKET/SOCK_DGRAM`.
+- The supplied IPv6 datagram is not copied or rewritten; the kernel adds the
+  Ethernet header using the selected interface and multicast destination MAC.
+- Only Ethernet-like interfaces are supported. Other link types return
+  `RawUnsupportedLinkType`.
+- Raw transmission normally requires root or `CAP_NET_RAW`; the namespace
+  roaming test also requires `CAP_NET_ADMIN`.
+- Link-layer transmission does not naturally re-enter the sender's local IP
+  receive path. Validate with a peer interface, another host, or packet capture.
+- `loopback = true` is unsupported for full-header IPv6. `false` or an omitted
+  preference is accepted.
+- Route-selected IPv4 continues to use an unbound, unconnected `IP_HDRINCL`
+  socket and the normal kernel route lookup.
 
 ### macOS
 
-The macOS implementation uses raw IP sockets for IPv4 and raw IPv6 sockets for
-IPv6.
-
-Practical notes:
-
-- raw packet transmit usually requires `root`
-- IPv4 and IPv6 are both supported
-- `bind_addr` is used as the exact local bind when provided
-- if `outgoing_interface` is given as an IP address without `bind_addr`,
-  `mctx-core` binds to that exact local address before sending
-- IPv4 uses `IP_HDRINCL`
-- IPv6 multicast still sets `IPV6_MULTICAST_IF` explicitly, and link-local
-  binds keep their interface scope
-- the IPv6 datagram source must match the local bind address
-- for IPv6, the kernel rebuilds the base IPv6 header on transmit instead of
-  accepting a caller-supplied full IPv6 header byte-for-byte
-- a distinct remote IPv6 source returns `RawPacketTransmitUnsupported` rather
-  than silently sending with a rewritten source
-- route-selected IPv4 is unbound and does not set `IP_BOUND_IF` or
-  `IP_MULTICAST_IF`
+- Explicit IPv6 uses `/dev/bpf` with `BIOCSETIF`, verifies `DLT_EN10MB`, and
+  enables `BIOCSHDRCMPLT`.
+- The Ethernet destination is `33:33` plus the low 32 bits of the multicast
+  group; the source MAC comes from the selected local interface.
+- BPF writes the complete supplied IPv6 datagram after that Ethernet header.
+- Root or suitable `/dev/bpf*` permissions are normally required.
+- Non-Ethernet BPF data-link types return `RawUnsupportedLinkType`.
+- BPF injection does not provide local IP multicast loopback.
+- Route-selected IPv6 remains unsupported because this release does not claim
+  a proven PF_ROUTE-based route-tracking implementation.
 
 ### Windows
 
-The Windows implementation currently supports IPv4 raw transmit only.
+Windows retains its existing IPv4 raw-socket backend. IPv6 raw multicast
+transmission returns `RawPacketTransmitUnsupported`. Built-in raw IPv6 APIs are
+not claimed to preserve an arbitrary remote source and complete header, and
+the crate does not add Npcap, WinDivert, or another external driver.
 
-Practical notes:
+iOS, Android, and other targets compile the API but report raw multicast
+transmission as unsupported.
 
-- raw packet transmit usually requires Administrator privileges
-- the implementation uses IPv4 raw sockets with `IP_HDRINCL`
-- `bind_addr` is used as the exact local IPv4 bind when provided
-- `IP_MULTICAST_IF` is still set explicitly for multicast egress
-- same-host multicast receive is not a reliable validation method for this raw
-  backend; prefer a second host or packet capture
-- IPv6 full-header transmit is not currently implemented and returns
-  `MctxError::RawPacketTransmitUnsupported(...)`
-- route-selected raw egress is not claimed and returns the same typed
-  unsupported error
+## Same-Host Behavior
 
-## Ignored Privileged Smoke Tests
+Full-header IPv6 egress is link-layer injection on Linux and macOS. It is
+visible on the wire but does not naturally feed a local UDP or raw-IP receiver
+on the sender. This is deliberate: switching to a host-stack raw socket for a
+local source would rebuild header fields and make the full-header capability
+conditional.
 
-The raw module also contains ignored privileged smoke tests:
+Ordinary UDP `Publication` loopback behavior is unchanged.
 
-Linux:
+## CLI Examples
 
-```bash
-MCTX_RAW_TEST_SOURCE_V4=192.168.1.20 cargo test --features raw-packets raw::context::tests::linux_raw_ipv4_send_report_smoke_test -- --ignored --exact --nocapture
-cargo test --features raw-packets raw::context::tests::linux_raw_ipv6_same_host_smoke_test -- --ignored --exact --nocapture
-```
+The `mctx_raw_send` binary builds a complete UDP-in-IP datagram for testing.
 
-macOS:
+Explicit IPv6 forwarding with an original remote source:
 
 ```bash
-MCTX_RAW_TEST_SOURCE_V4=192.168.1.20 cargo test --features raw-packets raw::context::tests::macos_raw_ipv4_send_smoke_test -- --ignored --exact --nocapture
-cargo test --features raw-packets raw::context::tests::macos_raw_ipv6_same_host_smoke_test -- --ignored --exact --nocapture
+sudo cargo run --features raw-packets --bin mctx_raw_send -- \
+  ff3e::8000:1234 5000 hello-v6 5 100 \
+  --source 2001:db8:ffff::10 \
+  --source-port 4000 \
+  --bind fd00::20 \
+  --interface fd00::20 \
+  --ttl 16 \
+  --no-loopback
 ```
 
-Windows PowerShell:
+Here `--source` is encoded into the inner header. `--bind` and `--interface`
+must identify the actual local egress.
 
-```powershell
-$env:MCTX_RAW_TEST_SOURCE_V4="192.168.1.20"
-cargo test --features raw-packets raw::context::tests::windows_raw_ipv4_send_report_smoke_test -- --ignored --exact --nocapture
+Linux route-selected IPv6:
+
+```bash
+sudo ip -6 route replace ff3e::8000:1234/128 dev eth0
+
+sudo cargo run --features raw-route-egress --bin mctx_raw_send -- \
+  ff3e::8000:1234 5000 hello-routed 5 100 \
+  --source 2001:db8:ffff::10 \
+  --source-port 4000 \
+  --route-selected-egress \
+  --ttl 16 \
+  --no-loopback
 ```
 
-Linux route-change namespace test:
+`--ttl` is encoded into the generated header in route-selected mode; it is not
+installed as a publication override.
+
+Scoped IPv6 uses an explicit interface:
+
+```bash
+sudo cargo run --features raw-packets --bin mctx_raw_send -- \
+  ff32::8000:1234 5000 hello-link 5 100 \
+  --source fe80::1234 \
+  --source-port 4000 \
+  --interface-index 7 \
+  --no-loopback
+```
+
+Use a peer receiver or packet capture for these IPv6 examples, not a same-host
+UDP receiver.
+
+## Reports and Errors
+
+`RawSendReport` includes the publication ID, parsed family, source,
+destination, next-header/protocol, complete IP byte count, configured local
+selector, caller interface selector, and resolved interface index when known.
+
+The raw path validates complete IPv4/IPv6 lengths, configured family, selector
+families, and multicast destination before transmission. Important typed
+failures include:
+
+- `InvalidRawIpDatagram`
+- `InvalidRawMulticastDestination`
+- `RawInterfaceRequired`
+- `Ipv6ScopedMulticastRequiresInterface`
+- `RawUnsupportedLinkType`
+- `RawPacketTransmitUnsupported`
+- `RawSocketCreateFailed`, `RawSocketBindFailed`, and `RawSendFailed`
+
+## Privileged Tests
+
+Linux IPv4 route roaming:
 
 ```bash
 sudo cargo test --features raw-route-egress \
   --test raw_route_egress_linux_namespace \
+  one_route_selected_publication_follows_ipv4_route_changes \
   -- --ignored --exact --nocapture
 ```
 
-This requires `iproute2`, `CAP_NET_ADMIN`, and `CAP_NET_RAW`. It uses two veth
-paths, starts with an unreachable multicast route, and then moves the route
-between interfaces while retaining one publication ID.
+Linux full-header IPv6 route roaming and recovery:
 
-## Validation Rules
+```bash
+sudo cargo test --features raw-route-egress \
+  --test raw_route_ipv6_linux_namespace \
+  one_ipv6_publication_roams_and_recovers_without_rewriting_the_packet \
+  -- --ignored --exact --nocapture
+```
 
-The raw path validates:
+The IPv6 test uses two veth pairs, changes and removes the multicast route,
+retains one publication ID, and compares the complete captured datagram byte
+for byte, including traffic class, flow label, hop limit, extension header,
+source/group, payload, and transport checksum.
 
-- the datagram must be a complete IPv4 or IPv6 packet
-- IPv4 total length and IPv6 payload length must match the supplied buffer
-- the destination must be multicast in strict mode
-- the configured family, if fixed, must match the datagram family
-- `bind_addr` and `outgoing_interface` must match the datagram family
-- explicit mode requires a local bind or interface selector
-- route-selected mode requires explicit IPv4 family and no bind/interface
-  selector or TTL override
+macOS BPF smoke test:
 
-## AMT / SSM Note
+```bash
+sudo MCTX_RAW_TEST_INTERFACE_V6=fd00::20 \
+  MCTX_RAW_TEST_SOURCE_V6=2001:db8:ffff::10 \
+  cargo test --features raw-packets \
+  raw::context::tests::macos_bpf_ipv6_full_header_send_smoke_test \
+  -- --ignored --exact --nocapture
+```
 
-This API is intended for AMT-style full-datagram forwarding and other cases
-where source fidelity matters.
-
-`mctx-core` does not add AMT logic itself. Linux can inject a remote-source IPv6
-datagram through its packet-socket path with complete-header fidelity. The
-Linux and macOS host-stack IPv6 paths are intended for matching local sources;
-the kernel rebuilds the base IPv6 header there. macOS and Windows return an
-explicit unsupported error where remote-source IPv6 fidelity is unavailable.
+The macOS smoke test verifies send/report behavior. Use packet capture on the
+selected interface to verify wire output.

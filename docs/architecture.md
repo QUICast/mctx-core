@@ -19,5 +19,8 @@ Design choices:
   are opt-in
 - `raw-packets` owns multicast forwarding semantics, while `raw-ip` is a
   separate caller-built IP datagram transport primitive for control traffic
-- `raw-route-egress` extends only `raw-packets`; it keeps raw sockets
-  unconnected and delegates IPv4 egress selection to the OS routing table
+- `raw-route-egress` extends only `raw-packets`; IPv4 remains unconnected and
+  OS-routed, while Linux IPv6 caches a main-table egress resolved through
+  NETLINK_ROUTE and invalidated by route/link notifications
+- source-preserving IPv6 uses link-layer backends: AF_PACKET on Linux and BPF
+  on macOS; these preserve the supplied datagram but bypass local IP loopback

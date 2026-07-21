@@ -1,4 +1,5 @@
 use crate::error::MctxError;
+use crate::raw::link::ipv6_multicast_mac;
 use socket2::Socket;
 use std::net::Ipv6Addr;
 use std::os::fd::{AsRawFd, FromRawFd};
@@ -108,6 +109,10 @@ fn packet_interface_index(interface_index: u32) -> Result<i32, MctxError> {
 
 fn ensure_ethernet_interface(interface_index: u32) -> Result<(), MctxError> {
     let (interface_name, link_type) = link_info(interface_index)?;
+    validate_ethernet_link_type(&interface_name, link_type)
+}
+
+fn validate_ethernet_link_type(interface_name: &str, link_type: i32) -> Result<(), MctxError> {
     if link_type != i32::from(libc::ARPHRD_ETHER) {
         return Err(MctxError::RawUnsupportedLinkType(format!(
             "{interface_name} (Linux ARPHRD {link_type})"
@@ -154,20 +159,14 @@ fn link_info(interface_index: u32) -> Result<(String, i32), MctxError> {
     )))
 }
 
-fn ipv6_multicast_mac(group: Ipv6Addr) -> [u8; 6] {
-    let octets = group.octets();
-    [0x33, 0x33, octets[12], octets[13], octets[14], octets[15]]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn derives_ipv6_multicast_destination_mac() {
-        assert_eq!(
-            ipv6_multicast_mac("ff3e::8000:1234".parse().unwrap()),
-            [0x33, 0x33, 0x80, 0x00, 0x12, 0x34]
-        );
+    fn rejects_non_ethernet_link_types() {
+        let error = validate_ethernet_link_type("tun0", i32::from(libc::ARPHRD_NONE)).unwrap_err();
+
+        assert!(matches!(error, MctxError::RawUnsupportedLinkType(_)));
     }
 }

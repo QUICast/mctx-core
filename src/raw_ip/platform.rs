@@ -1,9 +1,13 @@
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 use crate::config::PublicationAddressFamily;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::config::{Ipv6MulticastScope, ipv6_multicast_scope};
 use crate::error::MctxError;
 use crate::raw_ip::RawIpPublicationId;
-use crate::raw_ip::config::{RawIpSocketConfig, family_matches_ip};
+use crate::raw_ip::config::RawIpSocketConfig;
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+use crate::raw_ip::config::family_matches_ip;
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 use crate::raw_ip::datagram::{ParsedRawIpDatagram, parse_complete_ip_datagram};
 use crate::raw_ip::report::RawIpSendReport;
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
@@ -12,6 +16,7 @@ use crate::socket_cache::BoundedSocketCache;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 #[cfg(target_os = "macos")]
 use std::io::IoSlice;
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 use std::net::IpAddr;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::net::Ipv6Addr;
@@ -26,7 +31,9 @@ use std::sync::{Arc, Mutex};
 
 /// Platform-owned sockets for one generic raw-IP publication.
 pub(crate) struct RawIpTransmitSocket {
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     family: PublicationAddressFamily,
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     selection: RawIpSelection,
     #[cfg(target_os = "linux")]
     ipv4_socket: Option<Socket>,
@@ -69,6 +76,7 @@ impl RawIpProtocolSocketCache {
 impl std::fmt::Debug for RawIpTransmitSocket {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut debug = f.debug_struct("RawIpTransmitSocket");
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         debug
             .field("family", &self.family)
             .field("selection", &self.selection);
@@ -80,6 +88,7 @@ impl std::fmt::Debug for RawIpTransmitSocket {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 #[derive(Debug, Clone, Copy)]
 struct RawIpSelection {
     family: PublicationAddressFamily,
@@ -616,6 +625,7 @@ fn cached_ipv6_protocol_socket(
     lock_recover(cache).get_or_try_insert_with(key, open)
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn parse_for_socket(
     socket: &RawIpTransmitSocket,
     ip_datagram: &[u8],
@@ -647,6 +657,7 @@ fn ipv6_destination_scope_id(destination: Ipv6Addr, interface_index: u32) -> u32
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn ensure_full_send(bytes_sent: usize, expected: usize, transport: &str) -> Result<(), MctxError> {
     if bytes_sent != expected {
         return Err(MctxError::RawSendFailed(std::io::Error::new(
@@ -658,6 +669,7 @@ fn ensure_full_send(bytes_sent: usize, expected: usize, transport: &str) -> Resu
     Ok(())
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn raw_ip_send_report(
     socket: &RawIpTransmitSocket,
     publication_id: RawIpPublicationId,

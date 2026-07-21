@@ -130,13 +130,11 @@ mod tests {
     use super::*;
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     use crate::test_support::TEST_GROUP;
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(target_os = "macos")]
     use crate::test_support::recv_payload;
     #[cfg(target_os = "macos")]
     use crate::test_support::test_multicast_receiver;
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    use crate::test_support::test_multicast_receiver_v6;
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(target_os = "macos")]
     use std::net::Ipv6Addr;
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     use std::net::{IpAddr, Ipv4Addr};
@@ -152,7 +150,7 @@ mod tests {
         assert!(matches!(err, MctxError::RawInterfaceRequired));
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     #[test]
     fn raw_context_updates_id_lookup_after_swap_remove() {
         let mut ctx = RawContext::new();
@@ -172,7 +170,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     #[test]
     fn replacement_preserves_publication_id_and_count() {
         let mut ctx = RawContext::new();
@@ -195,7 +193,7 @@ mod tests {
         assert_eq!(ctx.publication_count(), 1);
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     #[test]
     fn failed_replacement_leaves_original_publication_usable() {
         let mut ctx = RawContext::new();
@@ -212,7 +210,7 @@ mod tests {
         assert_eq!(publication.config(), &original_config);
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     #[test]
     fn replacement_rejects_another_publications_config_transactionally() {
         let mut ctx = RawContext::new();
@@ -224,6 +222,26 @@ mod tests {
         let error = ctx.replace_publication(id, duplicate_config).unwrap_err();
 
         assert!(matches!(error, MctxError::DuplicatePublication));
+        assert_eq!(ctx.get_publication(id).unwrap().config(), &original_config);
+    }
+
+    #[cfg(all(target_os = "linux", feature = "raw-route-egress"))]
+    #[test]
+    fn failed_route_selected_replacement_preserves_the_original_publication() {
+        let mut ctx = RawContext::new();
+        let original_config = RawPublicationConfig::ipv6().with_ipv6_interface_index(7);
+        let id = ctx.add_publication(original_config.clone()).unwrap();
+
+        let error = ctx
+            .replace_publication(
+                id,
+                RawPublicationConfig::ipv6()
+                    .with_route_selected_egress()
+                    .with_loopback(true),
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, MctxError::RawPacketTransmitUnsupported(_)));
         assert_eq!(ctx.get_publication(id).unwrap().config(), &original_config);
     }
 
@@ -248,6 +266,19 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, MctxError::RawPacketTransmitUnsupported(_)));
+        assert_eq!(ctx.publication_count(), 0);
+    }
+
+    #[cfg(all(target_os = "macos", feature = "raw-route-egress"))]
+    #[test]
+    fn macos_route_selected_ipv6_is_explicitly_unsupported() {
+        let mut ctx = RawContext::new();
+
+        let error = ctx
+            .add_publication(RawPublicationConfig::ipv6().with_route_selected_egress())
+            .unwrap_err();
+
+        assert!(matches!(error, MctxError::RawPacketTransmitUnsupported(_)));
         assert_eq!(ctx.publication_count(), 0);
     }
 
@@ -335,44 +366,38 @@ mod tests {
         assert_eq!(report.bytes_sent, datagram.len());
     }
 
-    #[cfg(target_os = "linux")]
-    #[test]
-    #[ignore = "requires CAP_NET_RAW or root; validates same-host IPv6 ASM raw receive on loopback"]
-    fn linux_raw_ipv6_same_host_smoke_test() {
-        run_raw_ipv6_same_host_smoke_test();
-    }
-
     #[cfg(target_os = "macos")]
     #[test]
-    #[ignore = "requires root; validates same-host IPv6 ASM raw receive on loopback"]
-    fn macos_raw_ipv6_same_host_smoke_test() {
-        run_raw_ipv6_same_host_smoke_test();
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    fn run_raw_ipv6_same_host_smoke_test() {
-        let group = "ff01::1234".parse::<Ipv6Addr>().unwrap();
-        let source = Ipv6Addr::LOCALHOST;
-        let (receiver, port) = test_multicast_receiver_v6(group, source);
+    #[ignore = "requires root plus MCTX_RAW_TEST_INTERFACE_V6 and MCTX_RAW_TEST_SOURCE_V6; validates BPF full-header send/report only"]
+    fn macos_bpf_ipv6_full_header_send_smoke_test() {
+        let Some(interface) = std::env::var("MCTX_RAW_TEST_INTERFACE_V6")
+            .ok()
+            .and_then(|raw| raw.parse::<Ipv6Addr>().ok())
+        else {
+            return;
+        };
+        let Some(source) = std::env::var("MCTX_RAW_TEST_SOURCE_V6")
+            .ok()
+            .and_then(|raw| raw.parse::<Ipv6Addr>().ok())
+        else {
+            return;
+        };
+        let group = "ff3e::8000:1234".parse::<Ipv6Addr>().unwrap();
         let mut ctx = RawContext::new();
         let id = ctx
             .add_publication(
                 RawPublicationConfig::ipv6()
-                    .with_bind_addr(source)
-                    .with_outgoing_interface(source)
-                    .with_loopback(true),
+                    .with_outgoing_interface(interface)
+                    .with_loopback(false),
             )
             .unwrap();
+        let datagram = build_ipv6_udp_datagram(source, group, 4000, 5000, b"macos-bpf-v6");
 
-        let payload = b"raw-v6-smoke";
-        let datagram = build_ipv6_udp_datagram(source, group, 4000, port, payload);
         let report = ctx.send_raw(id, &datagram).unwrap();
 
         assert_eq!(report.source_ip, Some(IpAddr::V6(source)));
         assert_eq!(report.destination_ip, Some(IpAddr::V6(group)));
-        assert_eq!(report.ip_protocol, Some(17));
         assert_eq!(report.bytes_sent, datagram.len());
-        assert_eq!(recv_payload(&receiver), payload);
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
@@ -405,7 +430,7 @@ mod tests {
         datagram
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(target_os = "macos")]
     fn build_ipv6_udp_datagram(
         source: Ipv6Addr,
         destination: Ipv6Addr,
@@ -448,7 +473,7 @@ mod tests {
         !(sum as u16)
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(target_os = "macos")]
     fn udp_checksum_v6(source: Ipv6Addr, destination: Ipv6Addr, udp_packet: &[u8]) -> u16 {
         let mut pseudo = Vec::with_capacity(40 + udp_packet.len() + (udp_packet.len() % 2));
         pseudo.extend_from_slice(&source.octets());
@@ -461,7 +486,7 @@ mod tests {
         if checksum == 0 { 0xffff } else { checksum }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(target_os = "macos")]
     fn ones_complement_checksum(bytes: &[u8]) -> u16 {
         let mut sum = 0u32;
 

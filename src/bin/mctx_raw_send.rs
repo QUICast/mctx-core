@@ -272,19 +272,15 @@ fn parse_raw_send_cli_args(args: &[String]) -> Result<RawSendCliArgs, String> {
         return Err("--interface-index is only valid for IPv6 raw send".to_string());
     }
 
-    if parsed.route_selected_egress {
-        if !matches!(parsed.group, IpAddr::V4(_)) {
-            return Err("--route-selected-egress currently supports IPv4 only".to_string());
-        }
-        if parsed.bind_addr.is_some()
+    if parsed.route_selected_egress
+        && (parsed.bind_addr.is_some()
             || parsed.interface.is_some()
-            || parsed.interface_index.is_some()
-        {
-            return Err(
-                "--route-selected-egress cannot be combined with --bind, --interface, or --interface-index"
-                    .to_string(),
-            );
-        }
+            || parsed.interface_index.is_some())
+    {
+        return Err(
+            "--route-selected-egress cannot be combined with --bind, --interface, or --interface-index"
+                .to_string(),
+        );
     }
 
     Ok(parsed)
@@ -307,7 +303,10 @@ fn print_usage(program: &str) {
         "  {program} 232.1.2.3 5000 hello-routed 5 100 --source 198.51.100.10 --source-port 4000 --route-selected-egress"
     );
     eprintln!(
-        "  {program} ff31::8000:1234 5000 hello-v6 5 100 --source ::1 --source-port 4000 --interface ::1"
+        "  {program} ff3e::8000:1234 5000 hello-v6-routed 5 100 --source 2001:db8::10 --source-port 4000 --route-selected-egress --no-loopback"
+    );
+    eprintln!(
+        "  {program} ff32::8000:1234 5000 hello-v6 5 100 --source fe80::1234 --source-port 4000 --interface-index 7 --no-loopback"
     );
     eprintln!(
         "  {program} ff3e::8000:1234 5000 hello-v6 5 100 --source fd00::10 --source-port 4000 --interface fd00::10"
@@ -324,11 +323,12 @@ fn print_usage(program: &str) {
     eprintln!("  - --source-port defaults to 4000");
     eprintln!("  - use --interface or --interface-index when you need to force egress selection");
     eprintln!(
-        "  - --route-selected-egress leaves IPv4 unbound and follows the OS routing table (requires --features raw-route-egress)"
+        "  - route-selected IPv4 follows OS routing; Linux IPv6 follows the main table with route/link invalidation"
     );
     eprintln!(
-        "  - Linux and macOS support raw IPv4 and raw IPv6; Windows currently supports raw IPv4 only"
+        "  - Linux AF_PACKET and macOS BPF preserve complete IPv6 headers; they do not provide same-host IP loopback"
     );
+    eprintln!("  - Windows currently supports raw IPv4 only");
 }
 
 fn parse_ip_value(args: &[String], index: usize, flag: &str) -> Result<IpAddr, String> {
@@ -641,6 +641,33 @@ mod tests {
         assert_eq!(config.bind_addr, None);
         assert_eq!(config.outgoing_interface, None);
         assert_eq!(config.ttl, None);
+    }
+
+    #[cfg(feature = "raw-route-egress")]
+    #[test]
+    fn route_selected_cli_accepts_wider_scope_ipv6() {
+        let args = vec![
+            "mctx_raw_send".to_string(),
+            "ff3e::8000:1234".to_string(),
+            "5000".to_string(),
+            "hello".to_string(),
+            "--source".to_string(),
+            "2001:db8::10".to_string(),
+            "--route-selected-egress".to_string(),
+            "--no-loopback".to_string(),
+        ];
+
+        let parsed = parse_raw_send_cli_args(&args).unwrap();
+        let config = parsed.build_config().unwrap();
+
+        assert_eq!(config.egress_mode, mctx_core::RawEgressMode::RouteSelected);
+        assert_eq!(
+            config.family,
+            Some(mctx_core::PublicationAddressFamily::Ipv6)
+        );
+        assert_eq!(config.bind_addr, None);
+        assert_eq!(config.outgoing_interface, None);
+        assert_eq!(config.loopback, Some(false));
     }
 
     #[test]

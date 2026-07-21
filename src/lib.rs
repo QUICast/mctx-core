@@ -12,7 +12,13 @@ pub mod raw;
 #[cfg(feature = "raw-ip")]
 pub mod raw_ip;
 pub mod report;
-#[cfg(any(feature = "raw-packets", feature = "raw-ip"))]
+#[cfg(any(
+    all(
+        feature = "raw-ip",
+        any(target_os = "linux", target_os = "macos", windows)
+    ),
+    all(feature = "raw-packets", any(target_os = "macos", windows))
+))]
 mod socket_cache;
 #[cfg(test)]
 mod test_support;
@@ -33,8 +39,9 @@ pub use metrics::{
 pub use publication::{Publication, PublicationId, PublicationParts};
 #[cfg(feature = "raw-packets")]
 pub use raw::{
-    RawContext, RawPublication, RawPublicationConfig, RawPublicationId, RawSendReport,
-    RawValidationMode,
+    RawContext, RawIpv6EgressCapabilities, RawIpv6EgressCapability, RawPublication,
+    RawPublicationConfig, RawPublicationId, RawSendReport, RawValidationMode,
+    raw_ipv6_egress_capabilities,
 };
 #[cfg(feature = "raw-route-egress")]
 pub use raw::{

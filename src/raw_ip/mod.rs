@@ -8,6 +8,7 @@
 mod capabilities;
 mod config;
 mod context;
+#[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
 mod datagram;
 mod platform;
 mod publication;

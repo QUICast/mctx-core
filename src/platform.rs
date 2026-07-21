@@ -1,5 +1,8 @@
 use crate::MctxError;
-#[cfg(any(feature = "raw-packets", feature = "raw-ip"))]
+#[cfg(all(
+    any(feature = "raw-packets", feature = "raw-ip"),
+    any(target_os = "linux", target_os = "macos", windows)
+))]
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 
@@ -9,7 +12,10 @@ fn aligned_ffi_buffer<T>(byte_len: u32) -> Vec<std::mem::MaybeUninit<T>> {
     Vec::with_capacity(element_count)
 }
 
-#[cfg(all(unix, any(feature = "raw-packets", feature = "raw-ip")))]
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos"),
+    any(feature = "raw-packets", feature = "raw-ip")
+))]
 pub(crate) fn resolve_ipv4_interface_index(interface: Ipv4Addr) -> Result<u32, MctxError> {
     fn ambiguous_interface_error(interface: Ipv4Addr, first: u32, second: u32) -> MctxError {
         MctxError::InterfaceDiscoveryFailed(format!(
@@ -291,13 +297,6 @@ pub(crate) fn resolve_ipv6_interface_index(interface: Ipv6Addr) -> Result<u32, M
             ))
         });
     }
-}
-
-#[cfg(all(not(any(unix, windows)), feature = "raw-packets"))]
-pub(crate) fn resolve_ipv4_interface_index(interface: Ipv4Addr) -> Result<u32, MctxError> {
-    Err(MctxError::InterfaceDiscoveryFailed(format!(
-        "IPv4 interface resolution is not implemented on this platform for {interface}"
-    )))
 }
 
 #[cfg(not(any(unix, windows)))]

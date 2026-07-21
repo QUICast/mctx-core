@@ -121,6 +121,7 @@ impl RawIpSocketConfig {
         Ok(())
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
     pub(crate) fn resolved_family(&self) -> Result<PublicationAddressFamily, MctxError> {
         self.validate()?;
         self.family

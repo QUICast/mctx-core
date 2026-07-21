@@ -71,8 +71,8 @@ For IPv6 examples, source/interface rules, and CLI commands, see
 - `metrics`: snapshots, deltas, samplers, and Heimdall-style JSONL helpers.
 - `raw-packets`: complete multicast IP datagram transmit for AMT-style use
   cases.
-- `raw-route-egress`: adds kernel route-selected IPv4 egress to `raw-packets`
-  without changing its explicit-interface default.
+- `raw-route-egress`: adds route-selected IPv4 egress on Linux/macOS and
+  source-preserving IPv6 roaming on Linux to `raw-packets`.
 - `raw-ip`: complete unicast or multicast IP datagram transmit for caller-built
   control traffic such as ICMP Packet Too Big.
 - `mctx-core-py`: sibling workspace crate with Python and asyncio bindings.
@@ -100,14 +100,14 @@ For IPv6 examples, source/interface rules, and CLI commands, see
 The default UDP send path supports IPv4 and IPv6 multicast on the same
 platforms.
 
-Raw multicast IP datagram transmit is available behind the `raw-packets`
-feature. Linux and macOS support raw IPv4 and IPv6 transmit. Windows currently
-supports raw IPv4 transmit only. Linux uses packet-socket injection when an
-IPv6 datagram source differs from the configured local bind, preserving the
-complete header for AMT forwarding. Linux and macOS use the host raw-IPv6 path
-for matching local sources; that path preserves the source/group tuple and
-transport header while the kernel rebuilds the base IPv6 header. macOS returns
-an explicit unsupported error for remote-source IPv6 injection.
+Raw multicast IP datagram transmit is available behind `raw-packets`. Linux
+uses AF_PACKET and macOS uses BPF for explicit, source-preserving full-header
+IPv6 egress on Ethernet-like interfaces. With `raw-route-egress`, Linux also
+tracks IPv6 main-table route/link changes while retaining a publication ID.
+macOS route-selected IPv6 and all Windows IPv6 raw transmit remain explicitly
+unsupported. Link-layer IPv6 injection is visible on the wire but does not
+naturally feed the sender's local IP receive path. See [Raw Packet
+Transmit](docs/raw-packets.md) for exact capabilities and privilege rules.
 
 Generic raw-IP control transmit is available behind the independent `raw-ip`
 feature. It accepts a complete caller-supplied unicast or multicast datagram.

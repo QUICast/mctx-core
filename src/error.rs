@@ -136,10 +136,9 @@ pub enum MctxError {
     /// The supplied IPv6 datagram source does not match the configured local
     /// bind address required by a host-stack raw IPv6 backend.
     ///
-    /// The multicast raw-packet backend does not emit this error on Linux,
-    /// where remote sources use link-layer injection. The generic `raw-ip`
-    /// backend emits it when a kernel-built IPv6 base header would otherwise
-    /// select or rewrite a different source address.
+    /// Full-header multicast raw-packet backends do not emit this error. The
+    /// generic `raw-ip` backend emits it when a kernel-built IPv6 base header
+    /// would otherwise select or rewrite a different source address.
     #[error(
         "MCTX: raw datagram source address {datagram_source} does not match configured bind address {configured_bind_addr}"
     )]

@@ -34,15 +34,14 @@ impl RawPublication {
 
     /// Sends one complete IP datagram through the selected raw backend.
     ///
-    /// Link-layer backends preserve the supplied header. Host-stack IPv6
-    /// backends rebuild the base IPv6 header and only accept a matching local
-    /// source address.
+    /// Supported IPv6 backends use link-layer injection and preserve the
+    /// complete supplied datagram. They do not feed the local IP receive path.
     pub fn send_raw(&self, ip_datagram: &[u8]) -> Result<RawSendReport, MctxError> {
         send_raw_ip_datagram(&self.socket, self.id, &self.config, ip_datagram)
     }
 }
 
-#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 

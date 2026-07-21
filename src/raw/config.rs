@@ -24,7 +24,7 @@ pub enum RawEgressMode {
     /// Bind and pin egress using the configured local selectors.
     #[default]
     Explicit,
-    /// Leave IPv4 egress unbound so the operating system routes every send.
+    /// Let a supported platform route every send without an explicit selector.
     RouteSelected,
 }
 
@@ -40,8 +40,8 @@ pub struct RawPublicationConfig {
     /// The local IP address used to select and validate the egress interface.
     ///
     /// The source IP seen by receivers comes from the supplied datagram. This
-    /// field only identifies a local egress address. A matching IPv6 source can
-    /// use the host IP stack; a distinct source requires a link-layer backend.
+    /// field only identifies a local egress address; it does not constrain or
+    /// replace the source encoded in a full-header IPv6 datagram.
     pub bind_addr: Option<IpAddr>,
     /// Optional TTL or hop-limit override applied during transmit.
     pub ttl: Option<u8>,
@@ -159,16 +159,16 @@ impl RawPublicationConfig {
             ));
         }
 
-        if self.family != Some(PublicationAddressFamily::Ipv4) {
+        if self.family.is_none() {
             return Err(MctxError::RawPacketTransmitUnsupported(
-                "route-selected raw egress requires an explicitly configured IPv4 family"
+                "route-selected raw egress requires an explicitly configured address family"
                     .to_string(),
             ));
         }
 
         if self.ttl.is_some() {
             return Err(MctxError::RawPacketTransmitUnsupported(
-                "route-selected raw egress preserves the supplied IPv4 TTL and cannot use a TTL override"
+                "route-selected raw egress preserves the supplied TTL or hop limit and cannot use an override"
                     .to_string(),
             ));
         }
@@ -226,17 +226,20 @@ impl RawPublicationConfig {
         self
     }
 
-    /// Lets the operating system choose IPv4 egress from its routing table.
+    /// Lets a supported platform choose egress from its routing table.
     ///
     /// Route-selected mode rejects local bind/interface selectors and TTL
-    /// overrides. It is currently supported only for IPv4 on Linux and macOS.
+    /// overrides. Consult the raw egress capability APIs before selecting it.
     #[cfg(feature = "raw-route-egress")]
     pub fn with_route_selected_egress(mut self) -> Self {
         self.egress_mode = RawEgressMode::RouteSelected;
         self
     }
 
-    #[cfg(feature = "raw-route-egress")]
+    #[cfg(all(
+        feature = "raw-route-egress",
+        any(target_os = "linux", target_os = "macos", windows)
+    ))]
     pub(crate) fn uses_route_selected_egress(&self) -> bool {
         self.egress_mode == RawEgressMode::RouteSelected
     }
@@ -379,18 +382,26 @@ mod tests {
 
     #[cfg(feature = "raw-route-egress")]
     #[test]
-    fn route_selected_mode_rejects_ipv6_and_ttl_overrides() {
+    fn route_selected_mode_accepts_ipv6_but_rejects_ttl_overrides() {
         let ipv6_config = RawPublicationConfig::ipv6().with_route_selected_egress();
         let ttl_config = RawPublicationConfig::ipv4()
             .with_route_selected_egress()
             .with_ttl(8);
 
-        assert!(matches!(
-            ipv6_config.validate(),
-            Err(MctxError::RawPacketTransmitUnsupported(_))
-        ));
+        assert!(ipv6_config.validate().is_ok());
         assert!(matches!(
             ttl_config.validate(),
+            Err(MctxError::RawPacketTransmitUnsupported(_))
+        ));
+    }
+
+    #[cfg(feature = "raw-route-egress")]
+    #[test]
+    fn route_selected_mode_requires_a_fixed_family() {
+        let config = RawPublicationConfig::new().with_route_selected_egress();
+
+        assert!(matches!(
+            config.validate(),
             Err(MctxError::RawPacketTransmitUnsupported(_))
         ));
     }
